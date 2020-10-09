@@ -1,0 +1,3038 @@
+---
+title: "Flow analysis for average daily flow"
+author: "Water Resources Unit, NAHRIM"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: lumen
+    css: "www/bootstrap.css"
+    code_folding: hide
+    toc: true
+    toc_depth: 2
+    toc_float: true
+params:
+  Station_No: 
+    label: "Station number"
+    input: text
+    value: "5606410"
+  Station_Name: 
+    label: "Station name"
+    input: text
+    value: "Sg Muda"
+  SF_filename: 
+    label: "Daily average streamflow data in csv (Date, Flow)"
+    input: file
+    value: "5606410_SgMuda_thian.csv"
+  Water_year_month:
+    label: "Water year starts from month (if any, default is 1)"
+    input: numeric
+    value: 1
+    min: 1
+    max: 12
+    step: 1
+  Percentile_Q:
+    label: "Set percentile to find flow (if any, 0 if none)"
+    input: numeric
+    value: 0
+    min: 0
+    max: 100
+    step: 1
+  Q_percentile:
+    label: "Set flow (m^3/s) to find percentile (if any, 0 if none)"
+    input: numeric
+    value: 0
+  Min_cnt_yr:
+    label: "Minimum number of records per year for analysis"
+    input: numeric
+    value: 347
+    min: 1
+    max: 365
+    step: 1
+  Data_source: 
+    label: "Data source"
+    input: text
+    value: "JPS"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      warning=FALSE, 
+                      message=FALSE,
+                      fig.align = 'center')
+knitr::opts_knit$set(base.dir = normalizePath(tempdir(), winslash = '/'))
+
+```
+
+# Introduction
+
+This Rmarkdown document was created to simplify processing and analysis of daily average streamflow data. Most of the methods used in this analysis is in accordance with [Manual on Low-flow Estimation and Prediction](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf) by World Meteorological Organization (WMO, 2008). 
+
+
+
+# Input
+
+```{r warning=FALSE, message=FALSE, echo=FALSE}
+# load packages
+library(tidyverse)
+library(lubridate)
+
+library(lfstat)
+library(lmom)
+library(lmomRFA)
+library(Metrics)
+
+library(scales)
+library(rmarkdown)
+library(knitr)
+library(plotly)
+
+library(kableExtra)
+library(DT)
+library(reactable)
+
+library(extrafont)
+library(openxlsx)
+
+library(ggrepel)
+library(ggpmisc)
+library(grid)
+library(gridExtra)
+library(ggpubr)
+
+library(gghighlight)
+library(RColorBrewer)
+
+
+# set strings as factors to false
+options(stringsAsFactors = FALSE)
+
+```
+
+
+```{r echo=TRUE}
+
+#streamflow data
+station_no <- params$Station_No
+station_name <- params$Station_Name
+
+#catchment data
+#catch_A <- params$Catchment_area #km2
+
+#set filename
+filename2 <- paste0("SF", station_no, "_", station_name)
+
+#station streamflow data path in working dir
+sf_filename <- params$SF_filename
+
+#database file path (if any)
+db_path <- "F:/Documents/2020/20200604_SF_PM/Data/SF_1d_avg/SF_1d_avg_PM_all_clean1.csv"
+
+
+#water year, start month
+#if no water year, set 0
+water_yr_mth <- params$Water_year_month
+
+
+#set percentile to find flow
+#if no input, set 0
+Qn <- params$Percentile_Q
+
+#set flow (m3/s) to find percentile
+#if no input, set 0
+Q <- params$Q_percentile
+
+
+#minimum count per year for analysis
+min_cnt <- params$Min_cnt_yr
+
+
+#chart subtitle
+chart_subtitle <- paste0("Station ", station_no, ": ", station_name)
+
+#chart caption
+data_source <- params$Data_source
+chart_caption <- paste0("Data source: ", data_source)
+
+
+#new directory to save output files
+#new_dir <- tempdir()
+new_dir <- filename2
+
+
+#font
+font_family <- "Roboto"
+
+
+```
+
+Station number: **`r station_no`**
+
+Station name: **`r station_name`**
+
+
+Select **average daily streamflow** data in **csv** format. csv should have **2 columns**, with headers **Date** and **Flow** (case sensitive). Flow is in **m^3^/s**.
+
+```{r, eval=TRUE}
+#set working directory
+
+# get current working directory
+working_dir <- getwd()
+dir.create(filename2)
+setwd(filename2)
+
+```
+
+```{r}
+
+#run this code if streamflow data is from single station
+###########################
+##OPTIONS (streamflow station data or from database) #############
+# average daily flow data
+
+#input format in c(Date, Flow) in csv (case sensitive), station_no is station number, Flow in m3/s
+
+flowdata <- read.csv(file = paste0(sf_filename),
+                     #skip = 1,  #skip = 1 if csv from TIDEDA
+                     header = TRUE, sep=",") #depends on working dir
+
+```
+
+```{r, eval=FALSE}
+
+#run this code if streamflow data is from database
+#from streamflow database
+
+flow_db <- read.csv(file = db_path, header = TRUE, sep=",")
+
+flowdata <- flow_db %>%
+  filter(Stn_no == station_no) %>% #check field name
+  select(Date, Flow) %>%
+  arrange(Date)
+
+```
+
+Remove null values (-999) and other signs (?). Reformat data for analysis.
+
+```{r}
+
+# rename columns, format date
+colnames(flowdata)[1:2] <- c("Date", "Flow")
+#dataframe structure
+str(flowdata)
+
+```
+
+```{r, eval=TRUE}
+
+#specific to JPS data (TIDEDA) 
+#we extracted using Excel macro, default TIDEDA values
+
+#eval=FALSE if data is from other sources and cleaned
+
+#remove values
+##replace value '-999' with NA
+flowdata[flowdata == "-999"] <- NA
+#replace ? with blank
+flowdata$Flow = gsub("\\?", "", flowdata$Flow)
+
+#lag data
+x <- tail(flowdata, -1) %>% 
+  select(Date)
+y <- head(flowdata, -1) %>% 
+  select(Flow)
+flowdata <- cbind(x, y)
+
+```
+
+
+```{r}
+#reformat columns
+#if date is not in date format
+flowdata$Date <- as.Date(flowdata$Date, format = "%d/%m/%Y")
+
+#format column from character to numeric
+flowdata$Flow <- as.numeric(as.character(flowdata$Flow))
+
+
+# add columns for data aggregation
+## add a year column to data.frame
+flowdata <- flowdata %>%
+  mutate(year = year(Date))
+## add a month column to data.frame
+flowdata <- flowdata %>%
+  mutate(month = month(Date))
+## add a day column to data.frame
+flowdata <- flowdata %>%
+  mutate(day = day(Date))
+
+## add water year
+if (water_yr_mth == 1){
+  #if no water year
+  flowdata <- flowdata %>%
+    mutate(WYear = year(Date))
+} else {
+  #if got water year
+  flowdata <- flowdata %>%
+    mutate(WYear = ifelse(month >= water_yr_mth, year + 1, year))
+}
+
+#rename column
+flowdata <- flowdata %>% 
+  rename(flow = "Flow")
+
+# CREATE LF OBJECT
+lf_data <- createlfobj(flowdata, 
+                       hyearstart = water_yr_mth, #start of hydrological year
+                       baseflow = T)
+
+# define data unit
+setlfunit("m^3/s")
+flowunit(lf_data) <- "m^3/s"
+
+
+#rename column back
+flowdata <- flowdata %>% 
+  rename(Flow = "flow")
+
+
+```
+
+
+## Check Records
+
+> For the time series of daily mean flow data, it is not uncommon for an entire record to be rejected if, for example, more than 20 per cent of the values are missing. For a  single year’s daily data, thresholds of 5 per cent (more than 18 days of data missing) or 10 per cent are often used. 
+>
+> [Manual on Low-flow Estimation and Prediction - Section 3.3.1](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+
+In this case, years with more than **`r min_cnt`** days of data are included in subsequent analysis, which constitutes **`r round(min_cnt/365*100, 0)`%** of the data. Years with complete* data is thus defined as such. The following plot shows the years with complete* and incomplete data. 
+
+
+```{r}
+
+#run this chunk if use only years with complete* data
+
+# remove years with missing data
+## count non-missing data
+flowdata_cnt <- flowdata %>%
+  group_by(WYear) %>%
+  summarise(avg_Q = mean(Flow, na.rm = T), cnt = sum(!is.na(Flow)))
+
+## select years without missing data
+flowdata_cnt_list <- flowdata_cnt %>%
+  filter(cnt >= min_cnt)
+
+## select data
+flowdata_sel <- flowdata %>%
+  right_join(flowdata_cnt_list, by = "WYear") %>%
+  select(Date, WYear, month, day, Flow)
+
+# find max and min year
+max_year_all <- max(flowdata$WYear)
+min_year_all <- min(flowdata$WYear)
+max_year <- max(flowdata_sel$WYear)
+min_year <- min(flowdata_sel$WYear)
+total_year <- max_year - min_year + 1
+year_w_data <- length(unique(flowdata_sel$WYear))
+day_w_data <- length(unique(flowdata_sel$Date))
+angle_axis <- ifelse(total_year > 20, 90, 0)
+
+###########################
+# CREATE LF OBJECT for selected flow data
+
+#rename column
+flowdata_sel <- flowdata_sel %>% 
+  rename(flow = "Flow",
+         year = "WYear")
+
+#create LF object
+lf_data_sel <- createlfobj(flowdata_sel, 
+                       hyearstart = water_yr_mth, #start of hydrological year
+                       baseflow = T)
+
+# define data unit
+setlfunit("m^3/s")
+flowunit(lf_data_sel) <- "m^3/s"
+
+#rename column back
+flowdata_sel <- flowdata_sel %>% 
+  rename(Flow = "flow",
+         WYear = "year")
+
+###########################
+
+# check data count by year 
+
+flowdata_cnt2 <- flowdata_cnt %>%
+  mutate(status = ifelse(cnt >= min_cnt, "Complete", "Incomplete")) 
+gg_flowdata_cnt <- flowdata_cnt2 %>%
+  ggplot(aes(x = WYear, y = cnt, fill = status)) +
+  geom_bar(aes(text = paste0('Year: ', WYear,
+                             '<br>Record count: <b>', cnt,
+                             '</b> (', status, ')')),
+           stat = "identity") +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name= "Year", 
+                     breaks = seq(min(flowdata_cnt$WYear), 
+                                  max(flowdata_cnt$WYear), 
+                                  by = 1), 
+                     minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= "Count",
+                     breaks = seq(0, 400, by = 50), 
+                     limits = c(0, 400),
+                     minor_breaks = NULL) + #y axis format
+  scale_fill_manual(values=c("steelblue", #color
+                             "orange2"),
+                    name="Legend", 
+                    labels = c("Complete",
+                               "Incomplete")) +
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Streamflow record count by year")
+
+ggplotly(gg_flowdata_cnt, tooltip = "text",
+         width = 1000, height = 400)
+
+```
+
+
+The records for station **`r paste0(station_no, " ", station_name)`** starts from year **`r min_year_all`** to **`r max_year_all`**. Of the **`r total_year`** years, a total of **`r year_w_data`** years (**`r day_w_data`** days) with complete* records (defined here as having more than **`r min_cnt`** records per year) from year **`r min_year`** to **`r max_year`** are used in the analysis. Only years with complete* records are selected for analysis to reduce bias due to seasonal effect.
+
+
+```{r, fig.show = 'hide'}
+
+flowdata_cnt2 %>%
+  ggplot(aes(x = WYear, y = cnt, fill = status)) +
+  geom_bar(stat = "identity") +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name= "Year", 
+                     breaks = seq(min(flowdata_cnt$WYear), 
+                                  max(flowdata_cnt$WYear), 
+                                  by = 1), 
+                     minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= "Count",
+                     breaks = seq(0, 400, by = 50), 
+                     limits = c(0, 400),
+                     minor_breaks = NULL) + #y axis format
+  scale_fill_manual(values=c("steelblue", #color
+                             "orange2"),
+                    name="Legend", 
+                    labels = c("Complete",
+                               "Incomplete")) +
+  geom_hline(aes(yintercept = 365), 
+             color="black", 
+             alpha=0.3, 
+             size=1) + #avg line
+  geom_text(aes(WYear, cnt,
+                label = cnt, 
+                vjust = -0.5, hjust = 0.5), 
+            size=2, 
+            family="Roboto Light", 
+            fontface = 1, 
+            color="grey20") + #avg line label
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Streamflow record count by year",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_cnt_yr.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+## Check Maximum Data
+
+This plot shows the maximum average daily streamflow for each year. Hover over the bar to check the date of occurrence of the maximum streamflow.
+
+
+```{r}
+
+## find max and mean flow for each year
+flowdata_sel_max_mean <- flowdata_sel %>%
+  group_by(WYear) %>%
+  summarise(avg_Q = mean(Flow, na.rm = T), max_Q = max(Flow, na.rm = T),
+            Max_date = Date[which.max(Flow)])
+
+# check maximum values for each year
+gg_Q_max <- flowdata_sel_max_mean %>%
+  ggplot(aes(x = WYear, y = max_Q)) +
+  geom_bar(stat = "identity", fill = "cornflowerblue",
+           aes(text = paste0("Maximum flow <b>", max_Q,
+                             " m<sup>3</sup>/s</b> occurred on ", Max_date))) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name= "Year", 
+                     breaks = seq(min(flowdata_sel_max_mean$WYear), 
+                                  max(flowdata_sel_max_mean$WYear), 
+                                  by = 1), 
+                     minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= paste("Maximum Flow (m<sup>3</sup>/s )"),
+                     #breaks = seq(0, 3500, by = 500), 
+                     #limits = c(0, 400),
+                     minor_breaks = NULL) + #y axis format
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Maximum daily flow by year")
+
+ggplotly(gg_Q_max, tooltip = "text",
+         width = 900, height = 500)
+
+```
+
+
+```{r, fig.show = 'hide'}
+
+flowdata_sel_max_mean %>%
+  ggplot(aes(x = WYear, y = max_Q)) +
+  geom_bar(stat = "identity", fill = "cornflowerblue") +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name= "Year", 
+                     breaks = seq(min(flowdata_sel_max_mean$WYear), 
+                                  max(flowdata_sel_max_mean$WYear), 
+                                  by = 1), 
+                     minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= expression(paste("Maximum Flow (", m^3, "/s )")),
+                     #breaks = seq(0, 3500, by = 500), 
+                     #limits = c(0, 400),
+                     minor_breaks = NULL) + #y axis format
+  geom_hline(aes(yintercept = mean(max_Q)), 
+             color="black", 
+             alpha=0.3, 
+             size=1) + #avg line
+  geom_text(aes(WYear, max_Q,
+                label = max_Q, 
+                vjust = -0.5, hjust = 0.5), 
+            size=2, 
+            family="Roboto Light", 
+            fontface = 1, 
+            color="grey20") + #avg line label
+  annotate("text", x = min_year, 
+           y = mean(flowdata_sel_max_mean$max_Q), 
+           label = paste("Average==", 
+                         sprintf("%0.1f", mean(flowdata_sel_max_mean$max_Q)), 
+                         "~m^3/s"), 
+           parse = TRUE,
+           vjust = -0.2,
+           hjust = 0) +
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Maximum daily flow by year",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_max.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+## Check Minimum Data
+
+This plot shows the minimum average daily streamflow for each year. Hover over the bar to check the date of occurrence of the minimum streamflow.
+
+
+```{r}
+
+## find minimum flow for each year
+flowdata_sel_min <- flowdata_sel %>%
+  group_by(WYear) %>%
+  summarise(avg_Q = mean(Flow, na.rm = T), min_Q = min(Flow, na.rm = T), 
+            Min_date = Date[which.min(Flow)])
+
+# check minimum values for each year
+gg_Q_min <- flowdata_sel_min %>%
+  ggplot(aes(x = WYear, y = min_Q)) +
+  geom_bar(stat = "identity", fill = "cornflowerblue",
+           aes(text = paste0("Minimum flow <b>", min_Q,
+                             " m<sup>3</sup>/s</b> occurred on ", Min_date))) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name= "Year", 
+                     breaks = seq(min(flowdata_sel_min$WYear), 
+                                  max(flowdata_sel_min$WYear), 
+                                  by = 1), 
+                     minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= paste("Minimum Flow (m<sup>3</sup>/s )"),
+                     #breaks = seq(0, 3500, by = 500), 
+                     #limits = c(0, 400),
+                     minor_breaks = NULL) + #y axis format
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Minimum daily flow by year")
+
+ggplotly(gg_Q_min, tooltip = "text",
+         width = 900, height = 500)
+
+```
+
+
+```{r, fig.show = 'hide'}
+
+flowdata_sel_min %>%
+  ggplot(aes(x = WYear, y = min_Q)) +
+  geom_bar(stat = "identity", fill = "cornflowerblue") +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name= "Year", 
+                     breaks = seq(min(flowdata_sel_min$WYear), 
+                                  max(flowdata_sel_min$WYear), 
+                                  by = 1), 
+                     minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= expression(paste("Minimum Flow (", m^3, "/s )")),
+                     #breaks = seq(0, 3500, by = 500), 
+                     #limits = c(0, 400),
+                     minor_breaks = NULL) + #y axis format
+  geom_hline(aes(yintercept = mean(min_Q)), 
+             color="black", 
+             alpha=0.3, 
+             size=1) + #avg line
+  geom_text(aes(WYear, min_Q,
+                label = min_Q, 
+                vjust = -0.5, hjust = 0.5), 
+            size=2, 
+            family="Roboto Light", 
+            fontface = 1, 
+            color="grey20") + #avg line label
+  annotate("text", x = min_year, 
+           y = mean(flowdata_sel_min$min_Q), 
+           label = paste("Average==", 
+                         sprintf("%0.1f", mean(flowdata_sel_min$min_Q)), 
+                         "~m^3/s"), 
+           parse = TRUE,
+           vjust = -0.2,
+           hjust = 0) +
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Minimum daily flow by year",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_min.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+# Histogram
+
+Frequency distribution of streamflow data (complete* years).
+
+```{r}
+
+flow_freq <- flowdata_sel$Flow
+
+
+plot_ly(x = flowdata_sel$Flow, type = "histogram",
+        marker = list(color = "lightgray",
+                      line = list(color = "darkgray",
+                                  width = 2))) %>%
+  layout(title="Histogram", 
+         xaxis=list(title="Flow (m<sup>3</sup>/s)"))
+
+```
+
+
+```{r, fig.show = 'hide'}
+
+ggplot(flowdata_sel, aes(Flow)) +
+  geom_histogram(bins = 30, color = "darkgray", fill = "lightgray") +
+  theme_bw(base_size = 10) +
+  labs(title = "Histogram",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_histogram.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+# Hydrograph
+
+Long-term daily streamflow hydrograph for all available data (including data from incomplete years). 
+
+```{r dpi=200}
+
+## Data Aggregation
+
+# calculate the avg flow (m3/s) for each year
+Flow_avg_yr <- flowdata_sel %>%
+  #filter(Date < as.Date(paste0(end_year, "-01-01"))) %>% 
+  select(WYear, Flow) %>%
+  group_by(WYear) %>%
+  summarise(avg_Flow = mean(Flow)) 
+
+# calculate the avg flow (m3/s) for each month, each year
+Flow_avg_mth_all <- flowdata_sel %>%
+  #filter(Date < as.Date(paste0(end_year, "-01-01"))) %>% 
+  select(WYear, month, Flow) %>%
+  group_by(WYear, month) %>%
+  summarise(avg_Flow = mean(Flow))
+
+Flow_avg_mth <- Flow_avg_mth_all %>%
+  group_by(month) %>%
+  summarise(mth_Flow = mean(avg_Flow))
+
+
+# Hydrograph
+
+avg_Flow <- mean(flowdata$Flow, na.rm = T)
+
+flowdata_date <- flowdata %>%
+  mutate(Date2 = as.Date(Date)) %>%
+  complete(Date2 = seq.Date(min(Date), max(Date), by="day")) %>% 
+  mutate(hovertext = paste0("<b>", Flow, " m<sup>3</sup>/s</b> on ", Date2))
+
+gg_hydrograph <- flowdata_date %>%
+  ggplot(aes(x = Date2, y = Flow, text = hovertext, group = 1)) +
+  geom_line(color = "steelblue", size = 0.5, na.rm = T
+            #aes(text = paste0("<b>", Flow, " m<sup>3</sup>/s</b> on ", Date2))
+            ) +
+  theme_bw(base_size = 10) +
+  scale_x_date(name= "Year", date_labels = "%Y",
+               date_breaks = "year",
+               minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= paste("Daily Flow (m<sup>3</sup>/s )"),
+                     minor_breaks = NULL) + #y axis format
+  geom_hline(aes(yintercept = avg_Flow), 
+             color="black", 
+             alpha=0.3, 
+             size=1) + #avg line
+  annotate("text", x = as.Date(paste0(min_year, "-1-1")), y = avg_Flow, 
+           label = paste("Average =", sprintf("%0.1f", avg_Flow), "m<sup>3</sup>/s"), 
+           #parse = TRUE,
+           vjust = -0.2,
+           hjust = 0.5) +
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Hydrograph")
+
+ggplotly(gg_hydrograph, tooltip = "text",
+         width = 1000, height = 500,
+		 dynamicTicks = TRUE) %>% 
+  rangeslider()
+
+```
+
+
+```{r, fig.show = 'hide'}
+
+
+flowdata_date %>%
+  ggplot(aes(x = Date2, y = Flow)) +
+  geom_line(color = "steelblue", size = 0.5, na.rm = T) +
+  theme_bw(base_size = 10) +
+  scale_x_date(name= "Year", date_labels = "%Y",
+               date_breaks = "year",
+               minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= expression(paste("Daily Flow (", m^3, "/s )")),
+                     minor_breaks = NULL) + #y axis format
+  geom_hline(aes(yintercept = avg_Flow), 
+             color="black", 
+             alpha=0.3, 
+             size=1) + #avg line
+  annotate("text", x = as.Date(paste0(min_year, "-1-1")), y = avg_Flow, 
+           label = paste("Average==", sprintf("%0.1f", avg_Flow), "~m^3/s"), 
+           parse = TRUE,
+           vjust = -0.2,
+           hjust = 0) +
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Hydrograph",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_hydrograph.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+Long-term average flow for all available data is **`r round(avg_Flow, 1)` m^3^/s**.
+
+
+# Baseflow
+
+
+
+```{r}
+
+#baseflow
+bf_result <- baseflow(flowdata$Flow)
+
+#baseflow index (BFI)
+bfi_data <- BFI(lf_data, year = "any")
+#for selected data only
+bfi_data_sel <- BFI(lf_data_sel, year = "any")
+
+
+
+#plot hydrograph and baseflow
+
+#combine hydrograph and baseflow data
+flowdata_bf <- data.frame(flowdata, bf_result)
+
+gg_hydrograph_bf <- flowdata_bf %>%
+  ggplot(aes(x = Date, group = 1)) +
+  geom_line(aes(y = Flow), color = "aquamarine3", 
+            size = 0.5, na.rm = T) +
+  geom_line(aes(y = bf_result), color = "navy", 
+            size = 0.5, na.rm = T) +
+  theme_bw(base_size = 10) +
+  scale_x_date(name= "Year", date_labels = "%Y",
+               date_breaks = "year",
+               minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= paste("Daily Flow (m<sup>3</sup>/s )"),
+                     minor_breaks = NULL) + #y axis format
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 0.5)) +
+  labs(title = "Daily baseflow")
+
+ggplotly(gg_hydrograph_bf, #tooltip = "text",
+         width = 1000, height = 500,
+         dynamicTicks = TRUE) %>% 
+  rangeslider()
+
+```
+
+
+> The base-flow index (BFI) is the ratio of base flow to total flow calculated from a hydrograph separation procedure. ... Values of the index range from 0.15 to 0.2 for an impermeable catchment with a "flashy" flow regime to more than 0.95 for catchments with high storage capacity and a stable flow regime.
+>
+> [Manual on Low-flow Estimation and Prediction - Section 5.2](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+
+The BFI for station **`r paste0(station_no, " ", station_name)`** is **`r round(bfi_data_sel, 2)`** for selected data and **`r round(bfi_data, 2)`** for all available data. The BFI and baseflow separation is calculated using the package `lfstat` and is based on [WMO (2008)](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf).
+
+
+
+```{r, fig.show = 'hide'}
+
+flowdata_bf %>%
+  ggplot(aes(x = Date, group = 1)) +
+  geom_line(aes(y = Flow), color = "aquamarine3", 
+            size = 0.5, na.rm = T) +
+  geom_line(aes(y = bf_result), color = "navy", 
+            size = 0.5, na.rm = T) +
+  theme_bw(base_size = 10) +
+  scale_x_date(name= "Year", date_labels = "%Y",
+               date_breaks = "year",
+               minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= expression(paste("Baseflow (", m^3, "/s )")),
+                     minor_breaks = NULL) + #y axis format
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 0.5)) +
+  labs(title = "Daily baseflow",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_baseflow.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+# Annual Flow
+
+Average annual flow calculated from selected complete* years.
+
+```{r}
+
+#bar chart, annual flow (m3/s)
+#Total Annual Flow (m3/s)
+avg_Flow_yr <- mean(Flow_avg_yr$avg_Flow)
+
+gg_flow_avg_yr <- Flow_avg_yr %>%
+  ggplot(aes(x = WYear, y = avg_Flow)) +
+  geom_bar(stat = "identity", fill = "steelblue",
+           aes(text = paste0("Average flow for year ", WYear,
+                             " is ", sprintf("%0.1f", avg_Flow), " m<sup>3</sup>/s"))) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name= "Year", 
+                     breaks = seq(min_year, max_year, by = 1), 
+                     minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= paste("Average Annual Flow (m<sup>3</sup>/s )"),
+                     #breaks = seq(0, 3500, by = 500), 
+                     minor_breaks = NULL) + #y axis format
+  geom_hline(aes(yintercept = avg_Flow_yr), 
+             color="black", 
+             alpha=0.3, 
+             size=1) + #avg line
+  annotate("text", x = min_year + 2, y = avg_Flow_yr, 
+           label = paste("Average =", sprintf("%0.1f", avg_Flow_yr), "m<sup>3</sup>/s")) +
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Average annual flow")
+
+ggplotly(gg_flow_avg_yr, tooltip = "text",
+         width = 1000, height = 500)
+
+```
+
+Long-term average flow for all data in complete years is **`r round(avg_Flow_yr, 1)` m^3^/s**.
+
+```{r, fig.show = 'hide'}
+
+Flow_avg_yr %>%
+  ggplot(aes(x = WYear, y = avg_Flow)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name= "Year", 
+                     breaks = seq(min_year, max_year, by = 1), 
+                     minor_breaks = NULL) + #x axis format
+  scale_y_continuous(name= expression(paste("Average Annual Flow (", m^3, "/s )")),
+                     #breaks = seq(0, 3500, by = 500), 
+                     minor_breaks = NULL) + #y axis format
+  geom_hline(aes(yintercept = avg_Flow_yr), 
+             color="black", 
+             alpha=0.3, 
+             size=1) + #avg line
+  annotate("text", x = min_year, y = avg_Flow_yr, 
+           label = paste("Average==", sprintf("%0.1f", avg_Flow_yr), "~m^3/s"), 
+           parse = TRUE,
+           vjust = -0.2,
+           hjust = 0) +
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Average annual flow",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_flow_annual.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+```{r, fig.show = 'hide'}
+
+#bar chart, annual flow (m3/s) - no missing years
+#Total Annual flow (m3/s)
+#avg_Flow_yr <- mean(Flow_avg_yr$avg_Flow)
+Flow_avg_yr %>%
+  ggplot(aes(x = as.factor(WYear), y = avg_Flow)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_bw(base_size = 10) +
+  scale_x_discrete(name= "Year") + #x axis format
+  scale_y_continuous(name= expression(paste("Average Annual Flow (", m^3, "/s )")),
+                     #breaks = seq(0, 3500, by = 500), 
+                     minor_breaks = NULL) + #y axis format
+  geom_hline(aes(yintercept = avg_Flow_yr), 
+             color="black", 
+             alpha=0.3, 
+             size=1) + #avg line
+  annotate("text", x = 1, y = avg_Flow_yr, 
+           label = paste("Average==", sprintf("%0.1f", avg_Flow_yr), "~m^3/s"), 
+           parse = TRUE,
+           vjust = -0.2,
+           hjust = 0) +
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)) +
+  labs(title = "Average annual flow",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_flow_annual_nomissing.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+# Monthly Flow
+
+Calculated from selected complete* years.
+
+
+## Long-term Average Monthly Flow
+
+```{r}
+
+#bar chart, monthly flow (m3/s)
+#Long-term Average Monthly flow (m3/s)
+gg_flow_avg_mth <- Flow_avg_mth %>%
+  ggplot(aes(x = month, y = mth_Flow,
+             text = paste0("Long-term average monthly flow for ", month.name[month],
+                           " is ", sprintf("%0.1f", mth_Flow),
+                           "m<sup>3</sup>/s"))) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name = "Month",
+                     breaks = seq(1, 12, by = 1), 
+                     minor_breaks = NULL, 
+                     labels=month.abb) + #x axis format
+  scale_y_continuous(name= paste("Average Monthly Flow (m<sup>3</sup>/s )"),
+                     #breaks = seq(0, 350, by = 50), 
+                     minor_breaks = NULL) + #y axis format
+  theme(text=element_text(family=font_family, 
+                          color="grey20"),
+        panel.grid.major.x = element_blank()) +
+  labs(title = "Average monthly flow")
+
+ggplotly(gg_flow_avg_mth, tooltip = "text",
+         width = 800, height = 500) 
+
+```
+
+
+```{r, fig.show = 'hide'}
+
+Flow_avg_mth %>%
+  ggplot(aes(x = month, y = mth_Flow)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name = "Month",
+                     breaks = seq(1, 12, by = 1), 
+                     minor_breaks = NULL, 
+                     labels=month.abb) + #x axis format
+  scale_y_continuous(name = expression(paste("Average Monthly Flow (", m^3, "/s )")),
+                     #breaks = seq(0, 350, by = 50), 
+                     minor_breaks = NULL) + #y axis format
+  theme(text=element_text(family=font_family, 
+                          color="grey20"),
+        panel.grid.major.x = element_blank()) +
+  labs(title = "Average monthly flow",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_flow_mth.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+## Average Monthly Flow for Every Year
+
+```{r}
+
+#line chart, monthly flow for each year (m3/s)
+Flow_avg_mth_all2 <- Flow_avg_mth_all %>% 
+  mutate(hovertext = paste0("Average monthly flow for <b>", month.name[month],
+                           " ", WYear,
+                           "</b> is <b>", sprintf("%0.1f", avg_Flow),
+                           " m<sup>3</sup>/s</b>"))
+gg_flow_avg_mth_all <- Flow_avg_mth_all2 %>%
+  ggplot(aes(x = month, y = avg_Flow, group =1,
+             #group = WYear, 
+             text = hovertext,
+             colour = as.factor(WYear))) +
+  geom_line(size = 1) +
+  #gghighlight(WYear == max(WYear)) +
+  theme_bw(base_size = 10) +
+  #scale_color_brewer(palette = "Dark2") +
+  scale_x_discrete(limits = month.abb) +
+  scale_y_continuous(name= paste("Average Monthly Flow (m<sup>3</sup>/s )"),
+                     #breaks = seq(0, 350, by = 50), 
+                     minor_breaks = NULL) + #y axis format
+  labs(colour = "Year") + #legend title
+  theme(text=element_text(family=font_family, 
+                          color="grey20"),
+        panel.grid.major.x = element_blank()) +
+  labs(title = "Monthly flow for each year",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+ggplotly(gg_flow_avg_mth_all, tooltip = "text",
+         width = 800, height = 500) 
+
+```
+
+
+```{r, fig.show = 'hide'}
+
+Flow_avg_mth_all %>%
+  ggplot(aes(x = month, y = avg_Flow, 
+             group = WYear, colour = as.factor(WYear))) +
+  geom_line(size = 1) +
+  gghighlight(WYear == max(WYear)) +
+  theme_bw(base_size = 10) +
+  #scale_color_brewer(palette = "Dark2") +
+  scale_x_discrete(limits = month.abb) +
+  scale_y_continuous(name = expression(paste("Average Monthly Flow (", m^3, "/s )")),
+                     #breaks = seq(0, 350, by = 50), 
+                     minor_breaks = NULL) + #y axis format
+  labs(colour = "Year") + #legend title
+  theme(text=element_text(family=font_family, 
+                          color="grey20"),
+        panel.grid.major.x = element_blank()) +
+  labs(title = "Monthly flow for each year",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_flow_mth_highlight.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+## Boxplot of Monthly Flow
+
+```{r}
+
+#boxplot, monthly flow (m3/s)
+
+#plot boxplot
+box_flow_chart <- Flow_avg_mth_all %>%
+  ggplot(aes(x = month, y = avg_Flow, group = month
+             #alpha = 0.8
+             #color = as.factor(month)
+             )) +
+  geom_boxplot(outlier.colour="red", 
+               outlier.shape=20,
+               outlier.size=3,
+               #fill = "white", 
+               color = "steelblue3") +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name = "Month",
+                     breaks = seq(1, 12, by = 1), 
+                     minor_breaks = NULL, 
+                     labels=month.abb) + #x axis format
+  scale_y_continuous(name= paste("Monthly Flow (m<sup>3</sup>/s )"),
+                     #breaks = seq(0, 350, by = 50), 
+                     minor_breaks = NULL) + #y axis format
+  stat_summary(fun=mean, aes(shape = "Mean"), #mean value
+               geom="point", size=2.5, show.legend = F) +
+  stat_boxplot(geom ='errorbar', show.legend = F, width = 0.5,
+               color = "grey58") +
+  scale_shape_manual(name =NULL, values=c("Mean"=4)) +
+  #scale_color_brewer(palette="Set3") +
+  theme(text=element_text(family=font_family, 
+                          color="grey20"),
+        panel.grid.major.x = element_blank()) +
+  labs(title = "Monthly flow")
+
+
+ggplotly(box_flow_chart, #tooltip = "text",
+         width = 1000, height = 500) 
+
+```
+
+
+```{r, fig.show = 'hide'}
+#call function for boxplot legend
+#source("boxplot_legend.R", local = TRUE)
+
+
+ggplot_box_legend <- function(family = font_family){
+  
+  # Create data to use in the boxplot legend:
+  set.seed(100)
+  
+  sample_df <- data.frame(parameter = "test",
+                          values = sample(500))
+  
+  # Extend the top whisker a bit:
+  sample_df$values[1:100] <- 701:800
+  # Make sure there's only 1 lower outlier:
+  sample_df$values[1] <- -350
+  
+  # Function to calculate important values:
+  ggplot2_boxplot <- function(x){
+    
+    quartiles <- as.numeric(quantile(x, 
+                                     probs = c(0.25, 0.5, 0.75)))
+    
+    names(quartiles) <- c("25th percentile", 
+                          "50th percentile\n(median)",
+                          "75th percentile")
+    
+    IQR <- diff(quartiles[c(1,3)])
+    
+    upper_whisker <- max(x[x < (quartiles[3] + 1.5 * IQR)])
+    lower_whisker <- min(x[x > (quartiles[1] - 1.5 * IQR)])
+    
+    upper_dots <- x[x > (quartiles[3] + 1.5*IQR)]
+    lower_dots <- x[x < (quartiles[1] - 1.5*IQR)]
+    
+    return(list("quartiles" = quartiles,
+                "25th percentile" = as.numeric(quartiles[1]),
+                "50th percentile\n(median)" = as.numeric(quartiles[2]),
+                "75th percentile" = as.numeric(quartiles[3]),
+                "IQR" = IQR,
+                "upper_whisker" = upper_whisker,
+                "lower_whisker" = lower_whisker,
+                "upper_dots" = upper_dots,
+                "lower_dots" = lower_dots))
+  }
+  
+  # Get those values:
+  ggplot_output <- ggplot2_boxplot(sample_df$values)
+  
+  # Lots of text in the legend, make it smaller and consistent font:
+  update_geom_defaults("text", 
+                       list(size = 2.8, 
+                            hjust = 0,
+                            family = family))
+  # Labels don't inherit text:
+  update_geom_defaults("label", 
+                       list(size = 2.8, 
+                            hjust = 0,
+                            family = family))
+  
+  # Create the legend:
+  # The main elements of the plot (the boxplot, error bars, and count)
+  # are the easy part.
+  # The text describing each of those takes a lot of fiddling to
+  # get the location and style just right:
+  explain_plot <- ggplot() +
+    stat_boxplot(data = sample_df,
+                 aes(x = parameter, y=values),
+                 geom ='errorbar', width = 0.25,
+                 color = "grey58") +
+    geom_boxplot(data = sample_df,
+                 aes(x = parameter, y=values), 
+                 width = 0.3, 
+                 #fill = "lightgrey",
+                 color = "steelblue3",
+                 outlier.colour="red") +
+    # number of observations
+    #geom_text(aes(x = 1, y = 950, label = "500"), hjust = 0.5) +
+    #geom_text(aes(x = 1.17, y = 950,
+    #              label = "Number of values"),
+    #          fontface = "bold", vjust = 0.4) +
+    theme_minimal(base_size = 5, base_family = family) +
+    # mean point
+    geom_point(aes(x = 1, y = 390),
+               shape = 4, size = 2.5) + 
+    geom_text(aes(x = 1.2, 
+                  y =  390, 
+                  label = "Mean"), 
+              vjust = 0.5, fontface = "bold") +
+    # quartiles lines
+    geom_segment(aes(x = 2.3, xend = 2.3, 
+                     y = ggplot_output[["25th percentile"]], 
+                     yend = ggplot_output[["75th percentile"]])) +
+    geom_segment(aes(x = 1.2, xend = 2.3, 
+                     y = ggplot_output[["25th percentile"]], 
+                     yend = ggplot_output[["25th percentile"]])) +
+    geom_segment(aes(x = 1.2, xend = 2.3, 
+                     y = ggplot_output[["75th percentile"]], 
+                     yend = ggplot_output[["75th percentile"]])) +
+    # interquartile label
+    geom_text(aes(x = 2.4, y = ggplot_output[["50th percentile\n(median)"]]), 
+              label = "Interquartile\nrange", fontface = "bold",
+              vjust = 0.3) +
+    # whiskers lines
+    geom_segment(aes(x = 1, xend = 1, 
+                     y = ggplot_output[["upper_whisker"]], 
+                     yend = ggplot_output[["lower_whisker"]]),
+                 color = "grey58") +
+    # whiskers label
+    geom_text(aes(x = c(1.17,1.17), 
+                  y = c(ggplot_output[["upper_whisker"]],
+                        ggplot_output[["lower_whisker"]]), 
+                  label = c("Largest value within 1.5 times\ninterquartile range above\n75th percentile",
+                            "Smallest value within 1.5 times\ninterquartile range below\n25th percentile")),
+              fontface = "bold", vjust = 0.9) +
+    # outlier labels
+    geom_text(aes(x = c(1.17), 
+                  y =  ggplot_output[["lower_dots"]], 
+                  label = "Outlier"), 
+              vjust = 0.5, fontface = "bold") +
+    geom_text(aes(x = c(1.55), 
+                  y =  ggplot_output[["lower_dots"]], 
+                  label = ": Value is >1.5 times and"), 
+              vjust = 0.5) +
+    geom_text(aes(x = 1.17, 
+                  y = ggplot_output[["lower_dots"]], 
+                  label = "<3 times the interquartile range\nbeyond either end of the box"), 
+              vjust = 1.5) +
+    # quartiles labels
+    geom_label(aes(x = 1.17, y = ggplot_output[["quartiles"]]+1, 
+                   label = names(ggplot_output[["quartiles"]])),
+               vjust = c(0.4,0.6,0.4), 
+               fill = "white", label.size = 0) +
+    ylab("") + xlab("") +
+    theme(axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          panel.grid = element_blank(),
+          aspect.ratio = 4/3,
+          plot.title = element_text(hjust = 0.5, size = 11)) +
+    coord_cartesian(xlim = c(1.4,3.1), ylim = c(-600, 900)) +
+    labs(title = "EXPLANATION")
+  
+  return(explain_plot) 
+  
+}
+
+legend_plot <- ggplot_box_legend()
+
+
+```
+
+
+
+```{r, fig.show = 'hide'}
+
+box_flow_chart <- Flow_avg_mth_all %>%
+  ggplot(aes(x = month, y = avg_Flow, group = month
+             #alpha = 0.8
+             #color = as.factor(month)
+             )) +
+  geom_boxplot(outlier.colour="red", 
+               outlier.shape=20,
+               outlier.size=3,
+               #fill = "white", 
+               color = "steelblue3") +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name = "Month",
+                     breaks = seq(1, 12, by = 1), 
+                     minor_breaks = NULL, 
+                     labels=month.abb) + #x axis format
+  scale_y_continuous(name = expression(paste("Monthly Flow (", m^3, "/s )")),
+                     #breaks = seq(0, 350, by = 50), 
+                     minor_breaks = NULL) + #y axis format
+  stat_summary(fun=mean, aes(shape = "Mean"), #mean value
+               geom="point", size=2.5, show.legend = F) +
+  stat_boxplot(geom ='errorbar', show.legend = F, width = 0.5,
+               color = "grey58") +
+  scale_shape_manual(name =NULL, values=c("Mean"=4)) +
+  #scale_color_brewer(palette="Set3") +
+  theme(text=element_text(family=font_family, 
+                          color="grey20"),
+        panel.grid.major.x = element_blank()) +
+  labs(title = "Monthly flow",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+  
+#arrange chart and tables in 1 page
+g_boxplot <- ggarrange(box_flow_chart, legend_plot,
+                       ncol = 2, nrow = 1, widths = c(3,1))
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_flow_mth_boxplot.jpg"), 
+       dpi = 300, width = 297, height = 210, units = "mm",
+       g_boxplot)
+
+```
+
+
+# Flow-Duration Curve (FDC)
+
+> A flow-duration curve (FDC) represents the relationship between the magnitude and frequency of daily, weekly, monthly (or some other time interval of) streamflow for a particular river basin, providing an estimate of the percentage of time a given streamflow was equaled or exceeded over a historical period.
+>
+> Vogel R. M., Fennessey N. M. (1994). Flow-duration curves. I: New interpretation and confidence intervals. *Journal of Water Resources Planning and Management*, 120(4), 485–504.
+
+
+Here the FDC is calculated from selected complete* years.
+
+```{r}
+#number of records
+prob_nrow <- nrow(flowdata_sel)
+
+
+#create FDC data table
+#Weibull
+FDC_data <- flowdata_sel %>%
+  select(WYear, month, day, Flow) %>%
+  arrange(desc(Flow)) %>%
+  mutate(rank = dense_rank(desc(Flow))) %>%
+  mutate(rank2 = 1:n()) %>%
+  mutate(prob = rank2/(prob_nrow+1)*100) %>%
+  mutate(id = row_number())
+  
+
+#create FDC table
+FDC_table <- data.frame("Percentage" = c(1:100))
+FDC_table <- FDC_table %>%
+  mutate(Tens = as.integer(Percentage/10)*10,
+         Ones = Percentage %% 10)
+
+
+#find matching values
+j <- 1
+FDC_table$index <- 0
+for (j in 1:nrow(FDC_table)) {
+  FDC_table$index[j] <- which.min(abs(FDC_data$prob - FDC_table$Percentage[j]))
+}
+
+#match index of matching values
+FDC_table <- FDC_table %>%
+  left_join(FDC_data, by = c("index" = "id"))
+
+#pivot
+FDC_table_pv <- FDC_table %>%
+  select(Tens, Ones, Flow) %>%
+  spread(Ones, Flow)
+
+
+#in MLD
+FDC_table_MLD <- FDC_table %>%
+  select(Tens, Ones, Flow) %>%
+  mutate(Flow_MLD = Flow*1000/10^6*24*60*60) %>%
+  select(Tens, Ones, Flow_MLD) %>%
+  spread(Ones, Flow_MLD)
+
+
+
+#extract Qn (find flow of n percentile)
+Qn_ex <- FDC_table[Qn, "Flow"] #column Flow
+
+#extract n
+#search closest flow value to specified Q to find %
+n_ex <- FDC_table[which.min(abs(Q - FDC_table$Flow)), 
+                  "Percentage"] 
+```
+
+
+## Long-term FDC
+
+```{r, fig.show = 'hide'}
+
+options(scipen=10000)
+
+#for log axis
+breaks <- 10^(-10:10)
+minor_breaks <- rep(1:9, 21)*(10^rep(-10:10, each=9))
+
+
+#FDC - log axis
+FDC_data2 <- FDC_data %>%
+  select(Flow, prob)
+
+if (Q == 0 & Qn == 0){
+  
+  #no flow and percentage specified
+  
+  FDC_data2 %>%
+    ggplot(aes(x = prob, y = Flow)) +
+    geom_line(color = "steelblue", size = 1) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                       breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #x axis format
+    scale_y_log10(name = expression(paste("Flow (", m^3, "/s)")), 
+                  #breaks = seq(from=0, to=10, by = 1), 
+                  breaks = breaks, minor_breaks = minor_breaks,
+                  labels = scales::comma,
+                  sec.axis = sec_axis(~.*1000/10^6*24*60*60, 
+                                      name = "Flow (MLD)",
+                                      labels = scales::comma)) +
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12)) +
+    labs(title = "Flow-duration curve",
+         subtitle = paste0(chart_subtitle),
+         caption = paste0(chart_caption))
+  
+  } else if (Q == 0){
+  
+  #no flow specified
+  
+  FDC_data2 %>%
+    ggplot(aes(x = prob, y = Flow)) +
+    geom_line(color = "steelblue", size = 1) +
+    #find Q for specified n
+    geom_segment(aes(x = Qn, y = 0, xend = Qn, yend = Qn_ex),
+                 linetype = "dashed",
+                 color = "grey45") +
+    geom_segment(aes(x = 0, y = Qn_ex, xend = Qn, yend = Qn_ex),
+                 linetype = "dashed",
+                 color = "grey45") +
+    annotate("text", x = Qn, y = Qn_ex, 
+             label = paste("Q[", Qn,"]==", sprintf("%0.3f", Qn_ex), "~m^3/s==", 
+                           sprintf("%0.1f", Qn_ex*1000/10^6*24*60*60), "~MLD"), 
+             parse = TRUE,
+             vjust = -0.2,
+             hjust = 1.0) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                       breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #x axis format
+    scale_y_log10(name = expression(paste("Flow (", m^3, "/s)")), 
+                  #breaks = seq(from=0, to=10, by = 1), 
+                  breaks = breaks, minor_breaks = minor_breaks,
+                  labels = scales::comma,
+                  sec.axis = sec_axis(~.*1000/10^6*24*60*60, 
+                                      name = "Flow (MLD)",
+                                      labels = scales::comma)) +
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12)) +
+    labs(title = "Flow-duration curve",
+         subtitle = paste0(chart_subtitle),
+         caption = paste0(chart_caption))
+  
+} else if (Qn == 0) {
+  
+  #no percentage specified
+  
+  FDC_data2 %>%
+    ggplot(aes(x = prob, y = Flow)) +
+    geom_line(color = "steelblue", size = 1) +
+    #find n for specified Q
+    geom_segment(aes(x = n_ex, y = 0, xend = n_ex, yend = Q),
+                 linetype = "dashed",
+                 color = "grey45") +
+    geom_segment(aes(x = 0, y = Q, xend = n_ex, yend = Q),
+                 linetype = "dashed",
+                 color = "grey45") +
+    annotate("text", x = n_ex, y = Q, 
+             label = paste("Q[", n_ex,"]==", sprintf("%0.3f", Q), "~m^3/s==", 
+                           sprintf("%0.1f", Q*1000/10^6*24*60*60), "~MLD"), 
+             parse = TRUE,
+             vjust = -0.2,
+             hjust = 1.0) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                       breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #x axis format
+    scale_y_log10(name = expression(paste("Flow (", m^3, "/s)")), 
+                  #breaks = seq(from=0, to=10, by = 1), 
+                  breaks = breaks, minor_breaks = minor_breaks,
+                  labels = scales::comma,
+                  sec.axis = sec_axis(~.*1000/10^6*24*60*60, 
+                                      name = "Flow (MLD)",
+                                      labels = scales::comma)) +
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12)) +
+    labs(title = "Flow-duration curve",
+         subtitle = paste0(chart_subtitle),
+         caption = paste0(chart_caption))
+  
+} else {
+  
+  #flow and percentage specified
+  
+  FDC_data2 %>%
+    ggplot(aes(x = prob, y = Flow)) +
+    geom_line(color = "steelblue", size = 1) +
+    #find Q for specified n
+    geom_segment(aes(x = Qn, y = 0, xend = Qn, yend = Qn_ex),
+                 linetype = "dashed",
+                 color = "grey45") +
+    geom_segment(aes(x = 0, y = Qn_ex, xend = Qn, yend = Qn_ex),
+                 linetype = "dashed",
+                 color = "grey45") +
+    annotate("text", x = Qn, y = Qn_ex, 
+             label = paste("Q[", Qn,"]==", sprintf("%0.3f", Qn_ex), "~m^3/s==", 
+                           sprintf("%0.1f", Qn_ex*1000/10^6*24*60*60), "~MLD"), 
+             parse = TRUE,
+             vjust = -0.2,
+             hjust = 1.0) +
+    #find n for specified Q
+    geom_segment(aes(x = n_ex, y = 0, xend = n_ex, yend = Q),
+                 linetype = "dashed",
+                 color = "grey45") +
+    geom_segment(aes(x = 0, y = Q, xend = n_ex, yend = Q),
+                 linetype = "dashed",
+                 color = "grey45") +
+    annotate("text", x = n_ex, y = Q, 
+             label = paste("Q[", n_ex,"]==", sprintf("%0.3f", Q), "~m^3/s==", 
+                           sprintf("%0.1f", Q*1000/10^6*24*60*60), "~MLD"), 
+             parse = TRUE,
+             vjust = -0.2,
+             hjust = 1.0) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                       breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #x axis format
+    scale_y_log10(name = expression(paste("Flow (", m^3, "/s)")), 
+                  #breaks = seq(from=0, to=10, by = 1), 
+                  breaks = breaks, minor_breaks = minor_breaks,
+                  labels = scales::comma,
+                  sec.axis = sec_axis(~.*1000/10^6*24*60*60, 
+                                      name = "Flow (MLD)",
+                                      labels = scales::comma)) +
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12)) +
+    labs(title = "Flow-duration curve",
+         subtitle = paste0(chart_subtitle),
+         caption = paste0(chart_caption))
+  
+}
+
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_FDC_log.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+
+```
+
+```{r}
+#plotly
+
+gg_FDC_log <- FDC_data2 %>%
+    ggplot(aes(x = prob, y = Flow, group = 1,
+               text = paste0("<b>", sprintf("%0.1f", Flow), " m<sup>3</sup>/s</b> (",
+                             sprintf("%s", comma(Flow*86.4)),
+                             " MLD)<br> is equaled or exceeded <b>", sprintf("%0.1f", prob),
+                             "%</b> of the time"))) +
+    geom_line(color = "steelblue", size = 1) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                       breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #x axis format
+    scale_y_log10(name= paste("Flow (m<sup>3</sup>/s )"),
+                  #breaks = seq(from=0, to=10, by = 1), 
+                  breaks = breaks, minor_breaks = minor_breaks,
+                  labels = scales::comma) +
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12)) +
+    labs(title = "Flow-duration curve",
+         subtitle = paste0(chart_subtitle),
+         caption = paste0(chart_caption))
+
+
+ggplotly(gg_FDC_log, tooltip = "text",
+         width = 1000, height = 500) 
+
+```
+
+
+```{r, fig.show = 'hide'}
+
+##########
+#FDC - linear axis
+if (Q == 0 & Qn == 0){
+  #both flow and percentage specified or both not
+  FDC_data2 %>%
+    ggplot(aes(x = prob, y = Flow)) +
+    geom_line(color = "steelblue", size = 1) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                       breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #x axis format
+    scale_y_continuous(name = expression(paste("Flow (", m^3, "/s)")), 
+                       #breaks = seq(0, 3500, by = 500), 
+                       #limits = c(0, 400),
+                       minor_breaks = NULL,
+                       expand = c(0,0),
+                       sec.axis = sec_axis(~.*1000/10^6*24*60*60, 
+                                           name = "Flow (MLD)",
+                                           labels = scales::comma)) + #y axis format
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12)) +
+    labs(title = "Flow-duration curve",
+         subtitle = paste0(chart_subtitle),
+         caption = paste0(chart_caption))
+  
+} else if (Q == 0){
+  
+  # no flow specified
+  FDC_data2 %>%
+    ggplot(aes(x = prob, y = Flow)) +
+    geom_line(color = "steelblue", size = 1) +
+    #find Q for specified n
+    geom_segment(aes(x = Qn, y = 0, xend = Qn, yend = Qn_ex),
+                 linetype = "dashed",
+                 color = "grey45") +
+    geom_segment(aes(x = 0, y = Qn_ex, xend = Qn, yend = Qn_ex),
+                 linetype = "dashed",
+                 color = "grey45") +
+    annotate("text", x = Qn, y = Qn_ex, 
+             label = paste("Q[", Qn,"]==", sprintf("%0.3f", Qn_ex), "~m^3/s==", 
+                           sprintf("%0.1f", Qn_ex*1000/10^6*24*60*60), "~MLD"), 
+             parse = TRUE,
+             vjust = -0.2,
+             hjust = 1.0) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                       breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #x axis format
+    scale_y_continuous(name = expression(paste("Flow (", m^3, "/s)")), 
+                       #breaks = seq(0, 3500, by = 500), 
+                       #limits = c(0, 400),
+                       minor_breaks = NULL,
+                       expand = c(0,0),
+                       sec.axis = sec_axis(~.*1000/10^6*24*60*60, 
+                                           name = "Flow (MLD)",
+                                           labels = scales::comma)) + #y axis format
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12)) +
+    labs(title = "Flow-duration curve",
+         subtitle = paste0(chart_subtitle),
+         caption = paste0(chart_caption))
+  
+} else if (Qn == 0){
+  
+  #no percentage specified
+  FDC_data2 %>%
+    ggplot(aes(x = prob, y = Flow)) +
+    geom_line(color = "steelblue", size = 1) +
+    #find n for specified Q
+    geom_segment(aes(x = n_ex, y = 0, xend = n_ex, yend = Q),
+                 linetype = "dashed",
+                 color = "grey45") +
+    geom_segment(aes(x = 0, y = Q, xend = n_ex, yend = Q),
+                 linetype = "dashed",
+                 color = "grey45") +
+    annotate("text", x = n_ex, y = Q, 
+             label = paste("Q[", n_ex,"]==", sprintf("%0.3f", Q), "~m^3/s==", 
+                           sprintf("%0.1f", Q*1000/10^6*24*60*60), "~MLD"), 
+             parse = TRUE,
+             vjust = -0.2,
+             hjust = 1.0) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                       breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #x axis format
+    scale_y_continuous(name = expression(paste("Flow (", m^3, "/s)")), 
+                       #breaks = seq(0, 3500, by = 500), 
+                       #limits = c(0, 400),
+                       minor_breaks = NULL,
+                       expand = c(0,0),
+                       sec.axis = sec_axis(~.*1000/10^6*24*60*60, 
+                                           name = "Flow (MLD)",
+                                           labels = scales::comma)) + #y axis format
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12)) +
+    labs(title = "Flow-duration curve",
+         subtitle = paste0(chart_subtitle),
+         caption = paste0(chart_caption))
+  
+} else {
+  
+  #both flow and percentage specified or both not
+  FDC_data2 %>%
+    ggplot(aes(x = prob, y = Flow)) +
+    geom_line(color = "steelblue", size = 1) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                       breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #x axis format
+    scale_y_continuous(name = expression(paste("Flow (", m^3, "/s)")), 
+                       #breaks = seq(0, 3500, by = 500), 
+                       #limits = c(0, 400),
+                       minor_breaks = NULL,
+                       expand = c(0,0),
+                       sec.axis = sec_axis(~.*1000/10^6*24*60*60, 
+                                           name = "Flow (MLD)",
+                                           labels = scales::comma)) + #y axis format
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12)) +
+    labs(title = "Flow-duration curve",
+         subtitle = paste0(chart_subtitle),
+         caption = paste0(chart_caption))
+  
+}
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_FDC.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+Percentage exceedance (%) of flow in **m^3^/s**, with ones in columns and tens in rows.
+
+```{r}
+
+kable(FDC_table_pv, digits = c(0, 1,1,1,1,1,1,1,1,1,1)
+      #col.names = c("Year", "Average Annual Flow (m3/s)")
+      ) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = T) %>% 
+  column_spec(1, bold = T, background = "gray80")
+
+```
+
+
+Percentage exceedance (%) of flow in **MLD**, with ones in columns and tens in rows.
+
+```{r}
+
+kable(FDC_table_MLD, digits = c(0, 1,1,1,1,1,1,1,1,1,1)
+      #col.names = c("Year", "Average Annual Flow (m3/s)")
+      ) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = T) %>% 
+  column_spec(1, bold = T, background = "gray80")
+
+```
+
+
+## Monthly FDC
+
+```{r}
+
+#create df to store Qn_ex
+Qn_ex_mth_df <- NULL
+list_FDC_mth_cumecs <- list()
+list_FDC_mth_MLD <- list()
+
+for (a in 1:12) {
+  
+  #create FDC data table
+  FDC_data_mth <- flowdata_sel %>%
+    select(month, Flow) %>%
+    filter(month == a) %>%
+    arrange(desc(Flow)) %>%
+    mutate(rank = dense_rank(desc(Flow)))
+  
+  #number of records
+  prob_nrow_mth <- nrow(FDC_data_mth)
+  
+  #calculate prob dist
+  FDC_data_mth <- FDC_data_mth %>%
+    mutate(rank2 = 1:n()) %>%
+    mutate(prob = rank2/(prob_nrow_mth + 1)*100) %>%
+    mutate(id = row_number())
+  
+  #create FDC table
+  FDC_table_mth <- data.frame("Percentage" = c(1:100))
+  FDC_table_mth <- FDC_table_mth %>%
+    mutate(Tens = as.integer(Percentage/10)*10,
+           Ones = Percentage %% 10)
+  
+  #find matching values
+  k <- 1
+  FDC_table_mth$index <- 0
+  for (k in 1:nrow(FDC_table_mth)) {
+    FDC_table_mth$index[k] <- which.min(abs(FDC_data_mth$prob - FDC_table_mth$Percentage[k]))
+  }
+  
+  #match index of matching values
+  FDC_table_mth <- FDC_table_mth %>%
+    left_join(FDC_data_mth, by = c("index" = "id"))
+  
+  #pivot
+  FDC_table_pv_mth <- FDC_table_mth %>%
+    select(Tens, Ones, Flow) %>%
+    spread(Ones, Flow)
+  
+  #in MLD
+  FDC_table_MLD_mth <- FDC_table_mth %>%
+    select(Tens, Ones, Flow) %>%
+    mutate(Flow_MLD = Flow*1000/10^6*24*60*60) %>%
+    select(Tens, Ones, Flow_MLD) %>%
+    spread(Ones, Flow_MLD)
+  
+  #extract Qn_ex
+  ##if select particular Qn (chart needs to add segment etc)
+  ##Qn_ex_mth <- FDC_table_mth[Qn, "Flow"] #column Flow
+  ##if select all Q
+  Qn_ex_mth <- FDC_table_mth #column Flow
+  Qn_ex_mth_df <- rbind(Qn_ex_mth_df, data.frame(a, Qn_ex_mth))
+  
+  
+  #name data frames
+  assign(paste0("FDC_data_mth", a), FDC_data_mth)
+  assign(paste0("FDC_table_mth", a), FDC_table_mth)
+  assign(paste0("FDC_table_pv_mth", a), FDC_table_pv_mth)
+  assign(paste0("FDC_table_MLD_mth", a), FDC_table_MLD_mth)
+  
+  list_FDC_mth_cumecs[[a]] <- FDC_table_pv_mth
+  list_FDC_mth_MLD[[a]] <- FDC_table_MLD_mth
+  
+  #CHART
+  FDC_data_mth_2 <- FDC_data_mth %>%
+    select(Flow, prob)
+  FDC_data_mth_2 %>%
+    ggplot(aes(x = prob, y = Flow)) +
+    geom_line(color = "steelblue", size = 1) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                       breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #x axis format
+    scale_y_continuous(name = expression(paste("Flow (", m^3, " )")), 
+                       #breaks = seq(0, 100, by = 10), 
+                       minor_breaks = NULL,
+                       expand = c(0,0)) + #y axis format
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12)) +
+    labs(title = paste0("Flow duration curve for ", month.name[a]),
+         subtitle = paste0(chart_subtitle),
+         caption = paste0(chart_caption))
+  #print last plot to file
+  ggsave(paste0(new_dir, "/", filename2, "_FDC_mth", a, ".jpg"), 
+         width = 7.52, height = 4.56,
+         dpi = 300)
+  
+}
+
+
+#combine lists of monthly FDC
+FDC_data_mth_all <- Qn_ex_mth_df %>%
+  select(Percentage, month, Flow) %>%
+  mutate(Flow_MLD = Flow*1000/10^6*24*60*60)
+
+
+#round values
+FDC_data_mth_all$Flow <- lapply(FDC_data_mth_all$Flow, 
+                                      round, digits = 3)
+FDC_data_mth_all$Flow_MLD <- lapply(FDC_data_mth_all$Flow_MLD, 
+                                   round, digits = 1)
+
+###########################
+#replace column names
+Qn_ex_mth_df <- Qn_ex_mth_df %>% 
+  mutate(Flow_MLD = Flow*1000/10^6*24*60*60)
+
+#round values
+Qn_ex_mth_df$Flow <- lapply(Qn_ex_mth_df$Flow, 
+                                round, digits = 3)
+Qn_ex_mth_df$Flow_MLD <- lapply(Qn_ex_mth_df$Flow_MLD, 
+                             round, digits = 1)
+Qn_ex_mth_df2 <- as.data.frame(Qn_ex_mth_df)
+
+#fake month number to date
+Qn_ex_mth_df2$month <- as.Date(paste0(max_year, "-", Qn_ex_mth_df2$month, "-1"))
+#change to numeric
+Qn_ex_mth_df2 <- Qn_ex_mth_df2 %>%
+  mutate(Flow = as.numeric(Flow), 
+         Flow_MLD = as.numeric(Flow_MLD))
+
+```
+
+```{r, fig.show = 'hide'}
+###########################
+#MONTHLY FDC (in one chart)
+
+# log chart
+##format column from character to numeric
+FDC_data_mth_all$Flow <- as.numeric(as.character(FDC_data_mth_all$Flow))
+##set linetype
+linetype_mth <- c("solid", "solid", "dashed", "solid", "dotted", "solid", "longdash", 
+                  "solid", "dotted", "dotdash", "longdash", "solid")
+linetype_mth2 <- c("solid", "solid", "solid", "solid", "solid", "solid", "solid", 
+                  "solid", "solid", "solid", "solid", "solid")
+##plot
+FDC_data_mth_all %>%
+  ggplot(aes(x = Percentage, y = Flow, 
+             group = as.factor(month), color = as.factor(month))) +
+  geom_line(aes(linetype = as.factor(month)),
+            size = 0.5) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                     breaks = seq(0, 100, by = 10), 
+                     minor_breaks = NULL,
+                     expand = c(0,0)) + #x axis format
+  scale_y_log10(name = expression(paste("Flow (", m^3, "/s)")), 
+                #breaks = seq(from=0, to=10, by = 1), 
+                breaks = breaks, minor_breaks = minor_breaks,
+                labels = scales::comma,
+                sec.axis = sec_axis(~.*1000/10^6*24*60*60, 
+                                    name = "Flow (MLD)",
+                                    labels = scales::comma)) +
+  theme(text=element_text(family=font_family, 
+                          color="grey20", 
+                          size = 12)) +
+  scale_color_viridis_d("Month", direction = -1) +
+  scale_linetype_manual("Month", values = linetype_mth) +
+  labs(title = "Monthly flow-duration curve",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+##print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_FDC_mth_all_log.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+```{r}
+
+##plotly
+gg_FDC_mth_all <- FDC_data_mth_all %>%
+  ggplot(aes(x = Percentage, y = Flow, 
+             group = as.factor(month), color = as.factor(month),
+             text = paste0("<b>", sprintf("%0.1f", Flow), " m<sup>3</sup>/s</b> (",
+                             sprintf("%s", comma(Flow*86.4)),
+                             " MLD)<br> is equaled or exceeded <b>", sprintf("%0.0f", Percentage),
+                             "%</b> of the time in <b>", month.name[month], "</b>"))) +
+  geom_line(aes(linetype = as.factor(month)),
+            size = 0.5) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                     breaks = seq(0, 100, by = 10), 
+                     minor_breaks = NULL,
+                     expand = c(0,0)) + #x axis format
+  scale_y_log10(name = paste("Flow (m<sup>3</sup>/s )"), 
+                #breaks = seq(from=0, to=10, by = 1), 
+                breaks = breaks, minor_breaks = minor_breaks) +
+  theme(text=element_text(family=font_family, 
+                          color="grey20", 
+                          size = 12)) +
+  scale_color_viridis_d("Month", direction = -1) +
+  scale_linetype_manual("Month", values = linetype_mth) +
+  labs(title = "Monthly flow-duration curve")
+
+
+ggplotly(gg_FDC_mth_all, tooltip = "text",
+         width = 900, height = 500) 
+
+```
+
+
+```{r, fig.show = 'hide'}
+
+# linear axis chart
+FDC_data_mth_all %>%
+  ggplot(aes(x = Percentage, y = Flow, 
+             group = as.factor(month), color = as.factor(month))) +
+  geom_line(aes(linetype = as.factor(month)),
+            size = 0.5) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name = "Percentage Equaled or Exceeded", 
+                     breaks = seq(0, 100, by = 10), 
+                     minor_breaks = NULL,
+                     expand = c(0,0)) + #x axis format
+  scale_y_continuous(name = expression(paste("Flow (", m^3, " )")), 
+                     #breaks = seq(0, 3500, by = 500), 
+                     #limits = c(0, 400),
+                     minor_breaks = NULL,
+                     expand = c(0,0),
+                     sec.axis = sec_axis(~.*1000/10^6*24*60*60, 
+                                         name = "Flow (MLD)",
+                                         labels = scales::comma)) + #y axis format
+  theme(text=element_text(family=font_family, 
+                          color="grey20", 
+                          size = 12)) +
+  scale_color_viridis_d("Month", direction = -1) +
+  scale_linetype_manual("Month", values = linetype_mth) +
+  labs(title = "Monthly flow-duration curve",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_FDC_mth_all.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+Percentage exceedance (%) of flow in **m^3^/s** and **MLD** for each month.
+
+```{r}
+
+reactable(FDC_data_mth_all, defaultPageSize = 12, filterable = T,
+          highlight = TRUE, striped = TRUE,
+          columns = list(Percentage = colDef(align = "center"),
+                         month = colDef(name = "Month", align = "center"), 
+                         Flow = colDef(name = "Flow (m^3/s)", align = "right"), 
+                         Flow_MLD = colDef(name = "Flow (MLD)", align = "right")))
+
+```
+
+
+## Monthly FDC for Selected Percentiles
+
+```{r, echo=FALSE}
+
+#percentiles to be calculated
+percentile1 <- c("P75","P50","P25","P10","P5","P0") #original
+percentile2 <- c("Q25","Q50","Q75","Q90","Q95","Q100")
+
+
+#area chart for monthly FDC
+chartdata <- Qn_ex_mth_df %>%
+  filter(Percentage %in% c(25, 50, 75, 90, 95, 100)) %>%
+  mutate(P = paste0("Q", Percentage)) %>%
+  select(P, month, Flow, Flow_MLD)
+
+#TABLES #############
+#cumecs
+chart_table_cumecs <- chartdata %>%
+  select(P, month, Flow) %>%
+  spread(month, Flow) %>%
+  mutate(P = factor(P, levels = percentile2 )) %>%
+  arrange(P)
+
+#change column names
+colnames(chart_table_cumecs) <- c('Percentile',
+                                  'Jan','Feb','Mar','Apr','May','Jun',
+                                  'Jul', 'Aug','Sep','Oct','Nov','Dec')
+
+#table theme
+##color palette
+fdc_colors <- brewer.pal(6, "Blues")
+##viridis
+tt1 <- ttheme_minimal(
+  core=list(bg_params = list(fill = c("#453781FF", #color
+                                      "#39568CFF",
+                                      "#287D8EFF",
+                                      "#29AF7FFF",
+                                      "#95D840FF",
+                                      "#FDE725FF"), col=NA),
+            fg_params=list(fontface=1)))
+##blues
+tt2 <- ttheme_minimal(
+  core=list(bg_params = list(fill = c(rev(fdc_colors)), col=NA),
+            fg_params=list(fontface=1)))
+
+#conversion - no list
+chart_table_cumecs <- lapply(chart_table_cumecs, unlist) 
+chart_table_cumecs <- as.data.frame(chart_table_cumecs, stringsAsFactors = F) 
+
+
+#plot table
+#ggtexttable(chart_table_cumecs, rows = NULL)
+table_cumecs <- ggplot() + 
+  annotation_custom(tableGrob(chart_table_cumecs, theme=tt2, rows = NULL)) + 
+  labs(title = expression(Flow~(m^3/s))) +
+  theme_void()
+
+
+#############
+#MLD
+chart_table_MLD <- chartdata %>%
+  select(P, month, Flow_MLD) %>%
+  spread(month, Flow_MLD) %>%
+  mutate(P = factor(P, levels = percentile2 )) %>%
+  arrange(P)
+
+#change column names
+colnames(chart_table_MLD) <- c('Percentile',
+                               'Jan','Feb','Mar','Apr','May','Jun',
+                               'Jul', 'Aug','Sep','Oct','Nov','Dec')
+
+#conversion - no list
+chart_table_MLD <- lapply(chart_table_MLD, unlist) 
+chart_table_MLD <- as.data.frame(chart_table_MLD, stringsAsFactors = F) 
+
+#plot table
+table_MLD <- ggplot() + 
+  annotation_custom(tableGrob(chart_table_MLD, theme=tt2, rows = NULL)) + 
+  labs(title = "Flow (MLD)") +
+  theme_void()
+
+#plot multiple tables
+g_tables <- arrangeGrob(
+  table_cumecs,
+  table_MLD,
+  nrow=2) #generates g_tables
+
+ggsave(paste0(new_dir, "/", filename2, "_FDC_mth_table.jpg"), 
+       dpi = 300, g_tables,
+       width = 7.52, height = 4.56, units = "in")
+
+#############
+#chart
+
+##for ggplot2 to recognize month
+##fake month number to date
+chartdata$Month2 <- as.Date(paste0("2018-", chartdata$month, "-1"))
+#format column from character to numeric
+chartdata$Flow <- as.numeric(as.character(chartdata$Flow))
+
+##plot
+area_chart <- chartdata %>%
+  ggplot() +
+  geom_area(aes(x = Month2, y = Flow, 
+                fill = factor(P,
+                              levels = percentile2)),
+            position = position_dodge(width = 0)) + #so chart is not stacked
+  scale_fill_manual(values=c(rev(fdc_colors)), 
+                    name="Percentile") +
+  theme_bw(base_size = 10) +
+  scale_x_date(name= "Month", 
+               date_labels = "%b", #abbreviation, %B for full name
+               date_breaks = "1 month") + #x axis format
+  labs(title = "Monthly Flow by Percentile",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption),
+       y = expression(Flow~(m^3/s))) + #y axis label format
+  theme(text=element_text(family=font_family, 
+                          color="grey20", 
+                          size = 12))
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_FDC_mth_area.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+
+#arrange chart and tables in 1 page
+g_chart_tables <- ggarrange(area_chart, g_tables,
+                            #labels = c("A", "B"),
+                            ncol = 1, nrow = 2)
+
+
+#save plots layout
+ggsave(paste0(new_dir, "/", filename2, "_FDC_mth_summary.jpg"),
+       dpi = 300, 
+       width = 297, height = 210, units = "mm", #A4
+       g_chart_tables)
+
+include_graphics(paste0(new_dir, "/", filename2, "_FDC_mth_summary.jpg"))
+
+```
+
+
+# Low Flow (Frequency Analysis)
+
+>Estimates of the probability of occurrence of low-flow events can be derived from historical records using frequency analysis. 
+>
+> There are three primary scenarios when low-flow information is required. The first is when a water resources scheme is being developed. ... The second is during the operational phase of a water resources scheme once it is constructed... The third scenario is when it is necessary to make operational decisions today based on estimates of future river flows...
+>
+> [Manual on Low-flow Estimation and Prediction - Chapter 7](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+Three most commonly used durations are considered here, which are 1, 7 and 30 days duration. Moving average of all three durations are calculated and the annual minimum series are extracted.
+
+```{r}
+
+# mean annual minimum for 1, 7, 30 days average
+# 1 day each year
+mam1_data <- MAM(lf_data_sel, n = 1, year = "any", yearly = T)
+# 7 days each year
+mam7_data <- MAM(lf_data_sel, n = 7, year = "any", yearly = T)
+# 30 days each year
+mam30_data <- MAM(lf_data_sel, n = 30, year = "any", yearly = T)
+
+
+#combine data
+mam_data_all <- dplyr::bind_rows(list("1"=mam1_data, 
+                                  "7"=mam7_data,
+                                  "30"=mam30_data),
+                             .id = 'duration')
+
+```
+
+> An exploratory data analysis, including a graphical display of the data, is generally recommended before performing a statistical analysis, as it might reveal and help to explore important characteristics of the time series.
+>
+> [Manual on Low-flow Estimation and Prediction - Section 7.3](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+
+The annual minimum series for each duration are plotted below: 
+
+```{r, fig.show = 'hide'}
+
+# check minimum values for each year
+min_flow_plot <-
+  ggplot(mam_data_all, aes(x = hyear, y = MAn, group = duration)) +
+  geom_point(aes(shape = duration, color = duration), size = 2) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name= "Year", 
+                     breaks = seq(min(mam_data_all$hyear),
+                                  max(mam_data_all$hyear),by = 1),                     
+                     minor_breaks = NULL
+                     ) + #x axis format
+  scale_y_continuous(name= expression(paste("Minimum flow (", m^3, "/s )")),
+                     #breaks = seq(0, 200, by = 25), 
+                     #limits = c(0, 200),
+                     minor_breaks = NULL) + #y axis format
+  scale_color_manual(name = "Flow duration",
+                     values = c("limegreen", "turquoise4", "royalblue4"),
+                     breaks = c("1", "7", "30"),
+                     labels = c("1-day", "7-day", "30-day")) +
+  scale_shape_manual(name = "Flow duration",
+                     values = c(17, 16, 18),
+                     breaks = c("1", "7", "30"),
+                     labels = c("1-day", "7-day", "30-day")) +
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)
+        ) +
+  labs(title = "Minimum flow for different durations",
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+
+
+#print last plot to file
+ggsave(paste0(new_dir, "/", filename2, "_min_all.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+
+```{r}
+
+#plotly
+
+min_flow_plotly <-
+  ggplot(mam_data_all, aes(x = hyear, y = MAn, group = duration)) +
+  geom_point(aes(shape = duration, color = duration,
+                 text = paste0(hyear, "<br>Duration: ", duration, 
+                               "-day<br>Min flow: ", sprintf("%0.1f", MAn), 
+                               " m<sup>3</sup>/s")), 
+             size = 2) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(name= "Year", 
+                     breaks = seq(min(mam_data_all$hyear),
+                                  max(mam_data_all$hyear),by = 1),                     
+                     minor_breaks = NULL
+  ) + #x axis format
+  scale_y_continuous(name= paste0("Minimum flow (m<sup>3</sup>/s)"),
+                     #breaks = seq(0, 200, by = 25), 
+                     #limits = c(0, 200),
+                     minor_breaks = NULL) + #y axis format
+  scale_color_manual(name = "Flow duration",
+                     values = c("limegreen", "turquoise4", "royalblue4"),
+                     breaks = c("1", "7", "30")
+                     #labels = c("1-day", "7-day", "30-day")
+                     ) +
+  scale_shape_manual(name = "Flow duration",
+                     values = c(17, 16, 18),
+                     breaks = c("1", "7", "30")
+                     #labels = c("1-day", "7-day", "30-day")
+                     ) +
+  theme(text=element_text(family=font_family, color="grey20"),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(angle = angle_axis, hjust = 0.5)
+  ) +
+  labs(title = "Minimum flow for different durations")
+
+
+ggplotly(min_flow_plotly, tooltip = "text",
+         width = 800, height = 500) %>% 
+  layout(legend = list(traceorder = "normal"))
+
+```
+
+> Hydrological design may require extrapolation beyond the range of observations. This can be achieved by fitting a distribution function to the sample. 
+>
+> [Manual on Low-flow Estimation and Prediction - Section 7.5](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+
+Several distribution functions are fitted to each annual minima series. The probability distributions are listed below:
+
+1. Lognormal
+1. Pearson Type III
+1. Weibull (Extreme Value III) by L-moment 
+1. Generalized Extreme Value (GEV) (minima) by L-moment 
+1. Gumbel (Extreme Value I) (minima) by L-moment 
+1. Generalized Logistic (GLO)
+
+> ...Apart from the Weibull distribution, the functions commonly applied in low-flow frequency analysis include the EV I distribution (Gumbel), the log-normal distribution and the Pearson Type 3 (P3) distribution. The EV I distribution cannot in general be recommended for analysis of minima values as it is not bound (in the lower or upper tail); thus, there is a probability of negative values in the lower range. Nonetheless, it often empirically fits AM well and can be used, provided that caution is applied when extrapolating to negative flows. 
+>
+> [Manual on Low-flow Estimation and Prediction - Section 7.5](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+
+> ...The aim is to select the distribution that best described the underlying low flow frequencies. However, this goal was not necessarily achieved by a best fit to the sample data as low flow frequencies were derived for more than one duration, distributions which will have overall satisfactory fit for all the durations should be considered and chosen. Since a three parameter distribution, which behaves both relatively reliably and flexibly, is more often selected to represent the underlying population, candidate distributions include Pearson Type III (PE III), Generalized Logistic (GLO), Generalized Extreme Value (GEV).
+>
+> [Department of Irrigation and Drainage Malaysia (DID). (2015). *Hydrological Procedure No. 12: Magnitude and Frequency of Low Flows in Peninsular Malaysia*](http://h2o.water.gov.my/man_hp1/HP_12_Revised.pdf)
+
+
+The results of the fit are evaluated using Root Mean Square Error (RMSE) to select the best probability distribution.
+
+```{r}
+
+
+fit_dist_low_Q <- function(mam_data, duration_day){
+  
+  #PLOTTING POSITION - WEIBULL
+  #record length in years (n)
+  n_yrs_min <- nrow(mam_data)
+  
+  Q_pp <- mam_data %>% 
+    arrange(MAn) %>%
+    mutate(rank = dense_rank(MAn),
+           plot_p = rank/(n_yrs_min + 1)) %>% # plotting position
+    rename(Year = hyear,
+           Q = MAn)
+  
+  #vector of return periods
+  rp <- c(2, 5, 10, 25, 50, 100)
+  
+  #vector of distributions
+  #selected distributions for low flow (according to WMO 2008)
+  dist_lf <- c("ln3", "pe3", "wei", "gevR", "gumR", "glo")
+  
+  
+  #FITTING DISTRIBUTIONS
+  #use lfstat for fitting distributions
+  evfit.fxd <- evfit(mam_data$MAn, distribution = dist_lf,
+                     extreme = "minimum", zeta = 0) #so results same as hydrognomon
+  
+  q.evfit.fxd <- evquantile(evfit.fxd, return.period = rp)
+  
+  #extract quantile results
+  qT.evfit.fxd <- data.frame(q.evfit.fxd[["T_Years_Event"]])
+  qT.evfit.fxd <- as_data_frame(qT.evfit.fxd, rownames = "RP")
+  
+  #extract parameters
+  q.evfit.fxd.param <- q.evfit.fxd$parameters
+  
+  
+  #COMPARISON OF ALL DISTRIBUTIONS IN PROBABILITY PLOT
+  #for log axis
+  breaks <- 10^(-10:10)
+  minor_breaks <- rep(1:9, 21)*(10^rep(-10:10, each=9))
+  
+  #chart
+  Q_prob_plot <- Q_pp %>%
+    ggplot(aes(x = plot_p, y = Q)) +
+    geom_point(aes(x = plot_p, y = Q, color = "Empirical"),
+               shape = 16, size = 1.5) +
+    stat_function(fun = qualn3, args = list(unname(q.evfit.fxd.param$ln3)), 
+                  aes(color = "Lognormal"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    stat_function(fun = quape3, args = list(unname(q.evfit.fxd.param$pe3)), 
+                  aes(color = "Pearson Type III"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    stat_function(fun = quawei, args = list(unname(q.evfit.fxd.param$wei)), 
+                  aes(color = "Weibull (EV III) - LM"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    stat_function(fun = qua_ev, args = list(distribution = "gevR", para = q.evfit.fxd.param$gevR), 
+                  aes(color = "GEV (min) - LM"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    stat_function(fun = qua_ev, args = list(distribution = "gumR", para = q.evfit.fxd.param$gumR), 
+                  aes(color = "Gumbel (EV I - min) - LM"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    stat_function(fun = quaglo, args = list(unname(q.evfit.fxd.param$glo)), 
+                  aes(color = "GLO"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    theme_bw(base_size = 10) +
+    scale_x_log10(name = "Non-exceedance probability", 
+                  #name = "Return period (year)", 
+                  breaks = breaks, minor_breaks = minor_breaks,
+                  limits = c(0.01, 1),
+                  labels = scales::number_format(accuracy = 0.01)
+    ) + 
+    scale_y_log10(name = bquote(Annual~minimum~.(duration_day)-day~flow~(m^3/s)), 
+                  breaks = breaks, minor_breaks = minor_breaks,
+                  limits = c(1, 100), #adjust limits accordingly
+                  labels = scales::number_format(accuracy = 1)
+    ) +
+    scale_colour_manual("Legend",
+                        values = c("black", "red", "green3", "magenta", "orange", 
+                                   "blue2", "cyan3"),
+                        labels = c("Empirical", "GEV (min) - LM", "GLO", "Gumbel (EV I - min) - LM",
+                                   "Lognormal", "Pearson Type III", "Weibull (EV III) - LM")) +
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12),
+          legend.position = "right") +
+    labs(title = paste0("Probability plot for ", duration_day, "-day minimum flow"),
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+  
+  
+  #plotly
+  Q_prob_plotly <- Q_pp %>%
+    ggplot(aes(x = plot_p, y = Q)) +
+    geom_point(aes(x = plot_p, y = Q, color = "Empirical"),
+               shape = 16, size = 1.5) +
+    stat_function(fun = qualn3, args = list(unname(q.evfit.fxd.param$ln3)), 
+                  aes(color = "Lognormal"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    stat_function(fun = quape3, args = list(unname(q.evfit.fxd.param$pe3)), 
+                  aes(color = "Pearson Type III"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    stat_function(fun = quawei, args = list(unname(q.evfit.fxd.param$wei)), 
+                  aes(color = "Weibull (EV III) - LM"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    stat_function(fun = qua_ev, args = list(distribution = "gevR", para = q.evfit.fxd.param$gevR), 
+                  aes(color = "GEV (min) - LM"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    stat_function(fun = qua_ev, args = list(distribution = "gumR", para = q.evfit.fxd.param$gumR), 
+                  aes(color = "Gumbel (EV I - min) - LM"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    stat_function(fun = quaglo, args = list(unname(q.evfit.fxd.param$glo)), 
+                  aes(color = "GLO"), show.legend = T,
+                  size = 1, geom = "line", alpha = 0.5) +
+    theme_bw(base_size = 10) +
+    scale_x_log10(name = "Non-exceedance probability", 
+                  #name = "Return period (year)", 
+                  breaks = breaks, minor_breaks = minor_breaks,
+                  limits = c(0.01, 1),
+                  labels = scales::number_format(accuracy = 0.01)
+    ) + 
+    scale_y_log10(name = paste0("Annual minimum ", duration_day, "-day flow (m<sup>3</sup>/s)"), 
+                  breaks = breaks, minor_breaks = minor_breaks,
+                  labels = scales::number_format(accuracy = 1)
+    ) +
+    scale_colour_manual("Legend",
+                        values = c("black", "red", "green3", "magenta", "orange", 
+                                   "blue2", "cyan3"),
+                        labels = c("Empirical", "GEV (min) - LM", "GLO", "Gumbel (EV I - min) - LM",
+                                   "Lognormal", "Pearson Type III", "Weibull (EV III) - LM")) +
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12),
+          legend.position = "right") +
+    labs(title = paste0("Probability plot for ", duration_day, "-day minimum flow"))
+  
+  
+  #QQ PLOT
+  
+  #calculate quantiles
+  
+  qq_df <- Q_pp %>% 
+    mutate(gevR = qua_ev(distribution = "gevR", f=plot_p, para = q.evfit.fxd.param$gevR),
+           gumR = qua_ev(distribution = "gumR", f=plot_p, para = q.evfit.fxd.param$gumR),
+           glo = quaglo(f=plot_p, para= q.evfit.fxd.param$glo),
+           ln3 = qualn3(f=plot_p, para= q.evfit.fxd.param$ln3),
+           pe3 = quape3(f=plot_p, para= q.evfit.fxd.param$pe3),
+           wei = quawei(f=plot_p, para= q.evfit.fxd.param$wei))
+  
+  #pivot
+  qq_df2 <- qq_df %>% 
+    pivot_longer(cols = -c(1,2,3,4),
+                 names_to = "dist",
+                 values_to = "theory_q") 
+  #select columns
+  qq_df2 <- qq_df2[,c(2,4,5,6)]
+  
+  #replace distribution names
+  qq_df3 <- qq_df2 %>% 
+    mutate(dist2 = dist)
+  qq_df3 <- qq_df3 %>% 
+    mutate(dist2 = replace(dist2, dist == "gevR", "GEV (min) - LM"),
+           dist2 = replace(dist2, dist == "glo", "GLO"),
+           dist2 = replace(dist2, dist == "gumR", "Gumbel (EV I - min) - LM"),
+           dist2 = replace(dist2, dist == "ln3", "Lognormal"),
+           dist2 = replace(dist2, dist == "pe3", "Pearson Type III"),
+           dist2 = replace(dist2, dist == "wei", "Weibull (EV III) - LM"))
+  
+  
+  #chart
+  Q_QQ_plot <- qq_df3 %>%
+    ggplot() +
+    geom_point(aes(x = theory_q, y = Q, color = dist2,
+                   text = paste0("Distribution: ", dist2,
+                                 "<br>Empirical quantile: ", sprintf("%0.1f", Q),
+                                 " m<sup>3</sup>/s<br>Theoretical quantile: ",
+                                 sprintf("%0.1f", theory_q),
+                                 " m<sup>3</sup>/s")),
+               shape = 16, size = 1.5, alpha = 0.7) +
+    geom_abline(intercept = 0, slope = 1) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(name = "Theoretical quantiles",
+                       limits = c(0, NA)
+                       ) + #x axis format
+    scale_y_continuous(name = "Empirical quantiles",
+                       limits = c(0, NA) #adjust limits accordingly
+                       ) +
+    scale_colour_manual("Distribution",
+                        values = c("red", "green3", "magenta", "orange", 
+                                   "blue2", "cyan3"),
+                        labels = c("GEV (min) - LM", "GLO", "Gumbel (EV I - min) - LM",
+                                   "Lognormal", "Pearson Type III", "Weibull (EV III) - LM")) +
+    theme(text=element_text(family=font_family, 
+                            color="grey20", 
+                            size = 12),
+          legend.position = "right") +
+    labs(title = paste0("Quantile-quantile plot for ", duration_day, "-day minimum flow"),
+       subtitle = paste0(chart_subtitle),
+       caption = paste0(chart_caption))
+  
+  ##print last plot to file
+  #ggsave(paste0(new_dir, "_lowflow_", duration_day, "d_QQplot.jpg"), dpi = 300)
+  
+  
+  #EVALUATION
+  rmse_all <- qq_df3 %>% 
+    group_by(dist2) %>% 
+    summarise(RMSE = rmse(Q, theory_q))
+  
+  
+  #OUTPUT
+  return(list(table_return_period = qT.evfit.fxd, 
+              table_rmse = rmse_all,
+              plot_prob = Q_prob_plot,
+              plotly_prob = Q_prob_plotly, 
+              plot_QQ = Q_QQ_plot))
+  
+}
+
+```
+
+### Probability plot
+
+> A probability plot is a special form of the quantile plot or flow-duration curve. The values are ranked similarly to the quantile plot method; however, instead of plotting the observed frequencies, the observations are now assumed to be independent and a probability is assigned to each value by using plotting positions (Cunnane, 1978).
+>
+> [Manual on Low-flow Estimation and Prediction - Section 7.3](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+
+### Quantile-quantile plot
+
+> Graphical methods that plot the empirical quantiles (observations) against the distribution quantiles can provide an important visual check on how well the distribution fits the data. The points should lie close to the theoretical curve (probability plot) or the unit diagonal (pp-plot for probabilities and qq-plot for quantiles), if the distribution is a reasonable model for the data. 
+>
+> [Manual on Low-flow Estimation and Prediction - Section 7.8](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+
+### Evaluation
+
+> The deviation between the observations and the estimated quantiles from a theoretical distribution can also be judged by a statistical test such as analytical goodness-of-fit criteria. The purpose is to evaluate whether the difference between the ordered observations and the estimated quantile from a given distribution is statistically significant.
+>
+> [Manual on Low-flow Estimation and Prediction - Section 7.8](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+
+
+## 1-day Low-flow
+
+```{r}
+Q1_results <- fit_dist_low_Q(mam1_data, 1)
+Q1_rmse <- Q1_results$table_rmse
+Q1_RP <- Q1_results$table_return_period
+
+
+#plot
+#probability plot
+ggsave(plot = Q1_results$plot_prob,
+       paste0(new_dir, "/", filename2, "_lowQ_1d_prob.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+#QQ plot
+ggsave(plot = Q1_results$plot_QQ,
+       paste0(new_dir, "/", filename2, "_lowQ_1d_QQ.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+### Probability plot
+
+```{r}
+
+#plotly
+#probability plot
+ggplotly(Q1_results$plotly_prob,
+         width = 800, height = 500) 
+
+```
+
+### Quantile-quantile plot
+
+```{r}
+
+#QQ plot
+ggplotly(Q1_results$plot_QQ, tooltip = "text",
+         width = 800, height = 500)
+
+```
+
+### Quantile estimation for selected return period
+
+```{r}
+#table
+#return period
+
+Q1_RP %>% 
+  mutate_if(is.numeric, round, digits = 2) %>% 
+  mutate_all(~cell_spec(., "html", 
+                        color = ifelse(. < 0, "red"," black"))) %>%
+  kable(digits = c(0,1,1,1,1,1,1), escape = F, format = "html", align = "r",
+      col.names = c("Return Period","Lognormal", "Pearson Type III", "Weibull (EV III) - LM",
+                    "GEV (min) - LM", "Gumbel (EV I - min) - LM", "GLO")) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = T) %>%
+  column_spec(1, bold = T, background = "gray80") %>% 
+  column_spec(2:7, width = "3cm")
+
+
+```
+
+### Evaluation
+
+The results can be sorted by clicking on the header of interest.
+
+```{r}
+
+#goodness-of-fit (RMSE)
+reactable(Q1_rmse, 
+          highlight = TRUE, striped = TRUE,
+          columns = list(dist2 = colDef(name = "Distribution", align = "left"),
+                         RMSE = colDef(align = "right", format = colFormat(digits = 2))))
+
+```
+
+
+## 7-day Low-flow
+
+```{r}
+Q7_results <- fit_dist_low_Q(mam7_data, 7)
+Q7_rmse <- Q7_results$table_rmse
+Q7_RP <- Q7_results$table_return_period
+
+
+#plot
+#probability plot
+ggsave(plot = Q7_results$plot_prob,
+       paste0(new_dir, "/", filename2, "_lowQ_7d_prob.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+#QQ plot
+ggsave(plot = Q7_results$plot_QQ,
+       paste0(new_dir, "/", filename2, "_lowQ_7d_QQ.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+### Probability plot
+
+```{r}
+
+#plotly
+#probability plot
+ggplotly(Q7_results$plotly_prob,
+         width = 800, height = 500) 
+
+```
+
+### Quantile-quantile plot
+
+```{r}
+
+#QQ plot
+ggplotly(Q7_results$plot_QQ, tooltip = "text",
+         width = 800, height = 500)
+
+```
+
+### Quantile estimation for selected return period
+
+```{r}
+#table
+#return period
+Q7_RP %>% 
+  mutate_if(is.numeric, round, digits = 2) %>% 
+  mutate_all(~cell_spec(., "html", 
+                        color = ifelse(. < 0, "red"," black"))) %>%
+  kable(digits = c(0,1,1,1,1,1,1), escape = F, format = "html", align = "r",
+      col.names = c("Return Period","Lognormal", "Pearson Type III", "Weibull (EV III) - LM",
+                    "GEV (min) - LM", "Gumbel (EV I - min) - LM", "GLO")) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = T) %>%
+  column_spec(1, bold = T, background = "gray80") %>% 
+  column_spec(2:7, width = "3cm")
+
+```
+
+### Evaluation
+
+The results can be sorted by clicking on the header of interest.
+
+```{r}
+
+#goodness-of-fit (RMSE)
+reactable(Q7_rmse, 
+          highlight = TRUE, striped = TRUE,
+          columns = list(dist2 = colDef(name = "Distribution", align = "left"),
+                         RMSE = colDef(align = "right", format = colFormat(digits = 2))))
+
+```
+
+
+## 30-day Low-flow
+
+```{r}
+Q30_results <- fit_dist_low_Q(mam30_data, 30)
+Q30_rmse <- Q30_results$table_rmse
+Q30_RP <- Q30_results$table_return_period
+
+
+#plot
+#probability plot
+ggsave(plot = Q30_results$plot_prob,
+       paste0(new_dir, "/", filename2, "_lowQ_30d_prob.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+#QQ plot
+ggsave(plot = Q30_results$plot_QQ,
+       paste0(new_dir, "/", filename2, "_lowQ_30d_QQ.jpg"), dpi = 300,
+       width = 7.52, height = 4.56, units = "in")
+
+```
+
+### Probability plot
+
+```{r}
+
+#plotly
+#probability plot
+ggplotly(Q30_results$plotly_prob,
+         width = 800, height = 500) 
+
+```
+
+### Quantile-quantile plot
+
+```{r}
+
+#QQ plot
+ggplotly(Q30_results$plot_QQ, tooltip = "text",
+         width = 800, height = 500)
+
+```
+
+### Quantile estimation for selected return period
+
+```{r}
+#table
+#return period
+Q30_RP %>% 
+  mutate_if(is.numeric, round, digits = 2) %>% 
+  mutate_all(~cell_spec(., "html", 
+                        color = ifelse(. < 0, "red"," black"))) %>%
+  kable(digits = c(0,1,1,1,1,1,1), escape = F, format = "html", align = "r",
+      col.names = c("Return Period","Lognormal", "Pearson Type III", "Weibull (EV III) - LM",
+                    "GEV (min) - LM", "Gumbel (EV I - min) - LM", "GLO")) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = T) %>%
+  column_spec(1, bold = T, background = "gray80") %>% 
+  column_spec(2:7, width = "3cm")
+
+```
+
+### Evaluation
+
+The results can be sorted by clicking on the header of interest.
+
+```{r}
+
+#goodness-of-fit (RMSE)
+reactable(Q30_rmse, 
+          highlight = TRUE, striped = TRUE,
+          columns = list(dist2 = colDef(name = "Distribution", align = "left"),
+                         RMSE = colDef(align = "right", format = colFormat(digits = 2))))
+
+```
+
+
+## Overall comparison
+
+Compare RMSE for all durations, all distributions.
+
+```{r}
+
+compare_RMSE <- full_join(Q1_rmse, Q7_rmse, by = "dist2", suffix = c("_1", "_7"))
+
+compare_RMSE <- full_join(compare_RMSE, Q30_rmse, by = "dist2", suffix = c("", "_30"))
+
+colnames(compare_RMSE) <- c("Distribution", "1-day", "7-day", "30-day")
+
+
+reactable(compare_RMSE, highlight = TRUE, striped = TRUE,
+          defaultColDef = colDef(align = "right", format = colFormat(digits = 2)),
+          columns = list(Distribution = colDef(align = "left")))
+
+```
+
+
+
+# Export to Excel
+
+Check work directory for output.
+
+```{r, echo= FALSE, results= "hide"}
+
+###############################################################################
+#OUTPUT
+###############################################################################
+
+#rounding
+Flow_avg_yr$avg_Flow <- lapply(Flow_avg_yr$avg_Flow, 
+                               round, digits = 1)
+Flow_avg_mth$mth_Flow <- lapply(Flow_avg_mth$mth_Flow, 
+                                round, digits = 1)
+avg_Flow_yr <- lapply(avg_Flow_yr, 
+                      round, digits = 1)
+FDC_table_pv %>% mutate_at(2:11, funs(round(., 2)))
+FDC_table_MLD %>% mutate_at(2:11, funs(round(., 1)))
+
+
+###########################
+#summary page
+input_param <- c('Basin',
+                 'Streamflow Station', 
+                 'Length of record (year)', 
+                 #'Catchment Area (sqkm)',
+                 'Long-term mean flow (m3/s)')
+
+input_value <- c(station_name,
+                 station_no,
+                 year_w_data,
+                 #catch_A,
+                 avg_Flow_yr)
+input_page <- data.frame(cbind(input_param, input_value))
+
+
+#list all dataframe
+list_worksheet <- list("Input" = input_page,
+                       "Prob" = FDC_data2,
+                       "FDC" = FDC_table[c(1, 8)],
+                       "Flow" = Flow_avg_yr)
+
+
+# Create a blank workbook
+wb <- createWorkbook()
+
+# Loop through the list of split tables as well as their names
+#   and add each one as a sheet to the workbook
+Map(function(data, name){
+  addWorksheet(wb, name)
+  writeData(wb, name, data)
+}, list_worksheet, names(list_worksheet))
+
+## set col widths
+setColWidths(wb, 1, cols = 1:2, widths = "auto")
+
+
+###########################
+#insert data frames
+writeData(wb, "Input", station_name, 
+          startRow = 3, startCol = 3)
+#input flow data
+flowdata_output <- flowdata_date %>%
+  select(Date2, Flow) %>%
+  rename(Date = Date2)
+writeData(wb, "Input", flowdata_output, 
+          startRow = 9, startCol = 1)
+#flow summaries
+Flow_avg_yr_row <- nrow(Flow_avg_yr)
+writeData(wb, "Flow", Flow_avg_mth, 
+          startRow = Flow_avg_yr_row + 3, startCol = 1)
+
+
+#add new worksheet for FDC tables
+addWorksheet(wb, "Table")
+writeData(wb, "Table", "Exceedance Frequency (%) of Flow (m3/s)", 
+          startRow = 1, startCol = 1)
+writeData(wb, "Table", FDC_table_pv, 
+          startRow = 2, startCol = 1)
+#number and table border formatting
+s_cumecs <- createStyle(numFmt = "0.000", border= "TopBottomLeftRight", borderColour = "gray48")
+addStyle(wb, "Table", style = s_cumecs, rows = 3:13, cols = 2:11, gridExpand = TRUE)
+s_cumecs2 <- createStyle(border= "TopBottomLeftRight", borderColour = "gray48")
+addStyle(wb, "Table", style = s_cumecs2, rows = 2:13, cols = 1, gridExpand = TRUE)
+addStyle(wb, "Table", style = s_cumecs2, rows = 2, cols = 1:11, gridExpand = TRUE)
+
+
+writeData(wb, "Table", "Exceedance Frequency (%) of Flow (MLD)", 
+          startRow = 15, startCol = 1)
+writeData(wb, "Table", FDC_table_MLD, 
+          startRow = 16, startCol = 1)
+
+#number and table border formatting
+s_mld <- createStyle(numFmt = "0.0", border= "TopBottomLeftRight", borderColour = "gray48")
+addStyle(wb, "Table", style = s_mld, rows = 17:27, cols = 2:11, gridExpand = TRUE)
+s_mld2 <- createStyle(border= "TopBottomLeftRight", borderColour = "gray48")
+addStyle(wb, "Table", style = s_mld2, rows = 16:27, cols = 1, gridExpand = TRUE)
+addStyle(wb, "Table", style = s_mld2, rows = 16, cols = 1:11, gridExpand = TRUE)
+
+
+#add new worksheet for monthly FDC
+addWorksheet(wb, "Monthly")
+writeData(wb, "Monthly", "FDC for each month", 
+          startRow = 1, startCol = 1)
+writeData(wb, "Monthly", FDC_data_mth_all, 
+          startRow = 2, startCol = 1)
+
+
+#add new worksheet for low flow
+addWorksheet(wb, "Low_flow")
+dist_names <- c("Return Period","Lognormal", "Pearson Type III", "Weibull (EV III) - LM",
+                    "GEV (min) - LM", "Gumbel (EV I - min) - LM", "GLO")
+colnames(Q1_RP) <- dist_names
+colnames(Q7_RP) <- dist_names
+colnames(Q30_RP) <- dist_names
+
+writeData(wb, "Low_flow", "Comparison of RMSE for all distributions", 
+          startRow = 1, startCol = 1)
+writeData(wb, "Low_flow", compare_RMSE, 
+          startRow = 2, startCol = 1)
+writeData(wb, "Low_flow", "Quantile estimation (1-day)", 
+          startRow = 10, startCol = 1)
+writeData(wb, "Low_flow", Q1_RP, 
+          startRow = 11, startCol = 1)
+writeData(wb, "Low_flow", "Quantile estimation (7-day)", 
+          startRow = 20, startCol = 1)
+writeData(wb, "Low_flow", Q7_RP, 
+          startRow = 21, startCol = 1)
+writeData(wb, "Low_flow", "Quantile estimation (30-day)", 
+          startRow = 30, startCol = 1)
+writeData(wb, "Low_flow", Q30_RP, 
+          startRow = 31, startCol = 1)
+
+
+
+
+
+#insert image
+insertImage(wb, "Input", paste0(new_dir, "/", filename2, "_hydrograph.jpg"),  
+            width = 22.91, height = 14.82, 
+            startRow = 3, startCol = 7, units = "cm")
+insertImage(wb, "FDC", paste0(new_dir, "/", filename2, "_FDC.jpg"),  
+            width = 19.1, height = 11.58, 
+            startRow = 2, startCol = 5, units = "cm")
+insertImage(wb, "FDC", paste0(new_dir, "/", filename2, "_FDC_log.jpg"),  
+            width = 19.1, height = 11.58, 
+            startRow = 27, startCol = 5, units = "cm")
+insertImage(wb, "Flow", paste0(new_dir, "/", filename2, "_flow_annual.jpg"),  
+            width = 19.1, height = 11.58, 
+            startRow = 2, startCol = 5, units = "cm")
+insertImage(wb, "Flow", paste0(new_dir, "/", filename2, "_flow_annual_nomissing.jpg"),  
+            width = 19.1, height = 11.58, 
+            startRow = 2, startCol = 17, units = "cm")
+insertImage(wb, "Flow", paste0(new_dir, "/", filename2, "_flow_mth.jpg"),  
+            width = 19.1, height = 11.58, 
+            startRow = 27, startCol = 5, units = "cm")
+insertImage(wb, "Flow", paste0(new_dir, "/", filename2, "_flow_mth_boxplot.jpg"),  
+            width = 29.69, height = 21, 
+            startRow = 51, startCol = 5, units = "cm")
+insertImage(wb, "Monthly", paste0(new_dir, "/", filename2, "_FDC_mth_summary.jpg"),  
+            width = 29.69, height = 21, 
+            startRow = 2, startCol = 6, units = "cm")
+insertImage(wb, "Monthly", paste0(new_dir, "/", filename2, "_FDC_mth_all.jpg"),  
+            width = 19.1, height = 11.58, 
+            startRow = 45, startCol = 6, units = "cm")
+insertImage(wb, "Monthly", paste0(new_dir, "/", filename2, "_FDC_mth_all_log.jpg"),  
+            width = 19.1, height = 11.58, 
+            startRow = 70, startCol = 6, units = "cm")
+insertImage(wb, "Low_flow", paste0(new_dir, "/", filename2, "_lowQ_1d_prob.jpg"),  
+            width = 7.52, height = 4.56, units = "in", 
+            startRow = 40, startCol = 1)
+insertImage(wb, "Low_flow", paste0(new_dir, "/", filename2, "_lowQ_1d_QQ.jpg"),  
+            width = 7.52, height = 4.56, units = "in", 
+            startRow = 40, startCol = 13)
+insertImage(wb, "Low_flow", paste0(new_dir, "/", filename2, "_lowQ_7d_prob.jpg"),  
+            width = 7.52, height = 4.56, units = "in", 
+            startRow = 65, startCol = 1)
+insertImage(wb, "Low_flow", paste0(new_dir, "/", filename2, "_lowQ_7d_QQ.jpg"),  
+            width = 7.52, height = 4.56, units = "in", 
+            startRow = 65, startCol = 13)
+insertImage(wb, "Low_flow", paste0(new_dir, "/", filename2, "_lowQ_30d_prob.jpg"),  
+            width = 7.52, height = 4.56, units = "in", 
+            startRow = 90, startCol = 1)
+insertImage(wb, "Low_flow", paste0(new_dir, "/", filename2, "_lowQ_30d_QQ.jpg"),  
+            width = 7.52, height = 4.56, units = "in", 
+            startRow = 90, startCol = 13)
+
+
+###########################
+
+# Save workbook to working directory
+saveWorkbook(wb, file = paste0(new_dir, "/", filename2, "_flow_analysis.xlsx"), 
+             overwrite = TRUE)
+
+```
+
+
+# References
+
+[Manual on Low-flow Estimation and Prediction](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+## R Packages
+
+1. lfstat
+1. 
