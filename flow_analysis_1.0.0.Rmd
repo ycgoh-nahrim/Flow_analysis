@@ -1,11 +1,11 @@
 ---
-title: "Flow analysis for average daily flow"
+title: "Flow Analysis (v. 1.0)"
 author: "Water Resources Unit, NAHRIM"
 date: "`r Sys.Date()`"
 output: 
   html_document:
     theme: lumen
-    css: "www/bootstrap.css"
+    css: bootstrap.css
     code_folding: hide
     toc: true
     toc_depth: 2
@@ -60,13 +60,12 @@ knitr::opts_chunk$set(echo = FALSE,
                       warning=FALSE, 
                       message=FALSE,
                       fig.align = 'center')
-knitr::opts_knit$set(base.dir = normalizePath(tempdir(), winslash = '/'))
 
 ```
 
 # Introduction
 
-This Rmarkdown document was created to simplify processing and analysis of daily average streamflow data. Most of the methods used in this analysis is in accordance with [Manual on Low-flow Estimation and Prediction](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf) by World Meteorological Organization (WMO, 2008). 
+This Rmarkdown interactive document was created to simplify processing and analysis of *daily average streamflow data*. The results show the basic characteristics of the streamflow data. Most of the methods used in this analysis is in accordance with *[Manual on Low-flow Estimation and Prediction](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)* by World Meteorological Organization (WMO, 2008). 
 
 
 
@@ -110,7 +109,7 @@ options(stringsAsFactors = FALSE)
 ```
 
 
-```{r echo=TRUE}
+```{r echo=FALSE}
 
 #streamflow data
 station_no <- params$Station_No
@@ -156,8 +155,8 @@ chart_caption <- paste0("Data source: ", data_source)
 
 
 #new directory to save output files
-#new_dir <- tempdir()
-new_dir <- filename2
+#new_dir <- tempdir() #for shiny
+new_dir <- filename2  #for standalone rmd
 
 
 #font
@@ -166,15 +165,13 @@ font_family <- "Roboto"
 
 ```
 
-Station number: **`r station_no`**
+The streamflow station number is **`r station_no`**,  **`r station_name`**.
 
-Station name: **`r station_name`**
+The source of data is from **`r data_source`**. 
 
-
-Select **average daily streamflow** data in **csv** format. csv should have **2 columns**, with headers **Date** and **Flow** (case sensitive). Flow is in **m^3^/s**.
 
 ```{r, eval=TRUE}
-#set working directory
+#set working directory if standalone rmd, false if shiny
 
 # get current working directory
 working_dir <- getwd()
@@ -212,14 +209,13 @@ flowdata <- flow_db %>%
 
 ```
 
-Remove null values (-999) and other signs (?). Reformat data for analysis.
 
 ```{r}
 
 # rename columns, format date
 colnames(flowdata)[1:2] <- c("Date", "Flow")
 #dataframe structure
-str(flowdata)
+#str(flowdata)
 
 ```
 
@@ -236,7 +232,7 @@ flowdata[flowdata == "-999"] <- NA
 #replace ? with blank
 flowdata$Flow = gsub("\\?", "", flowdata$Flow)
 
-#lag data
+#lag data for 1 day
 x <- tail(flowdata, -1) %>% 
   select(Date)
 y <- head(flowdata, -1) %>% 
@@ -297,6 +293,10 @@ flowdata <- flowdata %>%
 
 
 ```
+
+> An exploratory data analysis, including a graphical display of the data, is generally recommended before performing a statistical analysis, as it might reveal and help to explore important characteristics of the time series.
+>
+> [Manual on Low-flow Estimation and Prediction - Section 7.3](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
 
 
 ## Check Records
@@ -624,7 +624,7 @@ ggsave(paste0(new_dir, "/", filename2, "_min.jpg"), dpi = 300,
 
 # Histogram
 
-Frequency distribution of streamflow data (complete* years).
+Frequency distribution of daily average streamflow data (complete* years).
 
 ```{r}
 
@@ -658,7 +658,7 @@ ggsave(paste0(new_dir, "/", filename2, "_histogram.jpg"), dpi = 300,
 
 # Hydrograph
 
-Long-term daily streamflow hydrograph for all available data (including data from incomplete years). 
+Long-term daily streamflow hydrograph for all available data (including data from incomplete years). Zoom into the hydrograph by selecting range of data.
 
 ```{r dpi=200}
 
@@ -765,6 +765,9 @@ Long-term average flow for all available data is **`r round(avg_Flow, 1)` m^3^/s
 
 # Baseflow
 
+>Baseflow is the portion of the streamflow that is sustained between precipitation events, fed to streams by delayed pathways.
+>
+>[Wikipedia](https://en.wikipedia.org/wiki/Baseflow)
 
 
 ```{r}
@@ -814,7 +817,7 @@ ggplotly(gg_hydrograph_bf, #tooltip = "text",
 > [Manual on Low-flow Estimation and Prediction - Section 5.2](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
 
 
-The BFI for station **`r paste0(station_no, " ", station_name)`** is **`r round(bfi_data_sel, 2)`** for selected data and **`r round(bfi_data, 2)`** for all available data. The BFI and baseflow separation is calculated using the package `lfstat` and is based on [WMO (2008)](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf).
+The BFI for station **`r paste0(station_no, " ", station_name)`** is **`r round(bfi_data_sel, 2)`** for selected data and **`r round(bfi_data, 2)`** for all available data. The BFI and baseflow separation is calculated using the package `lfstat` and is based on method from [WMO (2008)](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf).
 
 
 
@@ -885,7 +888,8 @@ ggplotly(gg_flow_avg_yr, tooltip = "text",
 
 ```
 
-Long-term average flow for all data in complete years is **`r round(avg_Flow_yr, 1)` m^3^/s**.
+
+Long-term average flow for all data in complete* years is **`r round(avg_Flow_yr, 1)` m^3^/s**.
 
 ```{r, fig.show = 'hide'}
 
@@ -961,7 +965,7 @@ ggsave(paste0(new_dir, "/", filename2, "_flow_annual_nomissing.jpg"), dpi = 300,
 
 # Monthly Flow
 
-Calculated from selected complete* years.
+Average monthly flow is calculated from selected complete* years.
 
 
 ## Long-term Average Monthly Flow
@@ -1023,6 +1027,8 @@ ggsave(paste0(new_dir, "/", filename2, "_flow_mth.jpg"), dpi = 300,
 ```
 
 ## Average Monthly Flow for Every Year
+
+Average monthly flow for every year. Click on any year in the legend to hide, or double-click to show specific years.
 
 ```{r}
 
@@ -1087,6 +1093,10 @@ ggsave(paste0(new_dir, "/", filename2, "_flow_mth_highlight.jpg"), dpi = 300,
 ```
 
 ## Boxplot of Monthly Flow
+
+>A boxplot is a standardized way of displaying the dataset based on a five-number summary: the minimum, the maximum, the sample median, and the first (lower) and third (upper) quartiles. ... The interquartile range (IQR) is the distance between the upper and lower quartiles.
+>
+>[Wikipedia](https://en.wikipedia.org/wiki/Box_plot)
 
 ```{r}
 
@@ -1335,7 +1345,7 @@ ggsave(paste0(new_dir, "/", filename2, "_flow_mth_boxplot.jpg"),
 > Vogel R. M., Fennessey N. M. (1994). Flow-duration curves. I: New interpretation and confidence intervals. *Journal of Water Resources Planning and Management*, 120(4), 485–504.
 
 
-Here the FDC is calculated from selected complete* years.
+The following FDC is calculated from complete* years of daily average streamflow data.
 
 ```{r}
 #number of records
@@ -1754,6 +1764,7 @@ ggsave(paste0(new_dir, "/", filename2, "_FDC.jpg"), dpi = 300,
 
 Percentage exceedance (%) of flow in **m^3^/s**, with ones in columns and tens in rows.
 
+
 ```{r}
 
 kable(FDC_table_pv, digits = c(0, 1,1,1,1,1,1,1,1,1,1)
@@ -1767,6 +1778,7 @@ kable(FDC_table_pv, digits = c(0, 1,1,1,1,1,1,1,1,1,1)
 
 
 Percentage exceedance (%) of flow in **MLD**, with ones in columns and tens in rows.
+
 
 ```{r}
 
@@ -1875,9 +1887,9 @@ for (a in 1:12) {
          subtitle = paste0(chart_subtitle),
          caption = paste0(chart_caption))
   #print last plot to file
-  ggsave(paste0(new_dir, "/", filename2, "_FDC_mth", a, ".jpg"), 
-         width = 7.52, height = 4.56,
-         dpi = 300)
+  #if standalone rmd
+  #ggsave(paste0(new_dir, "/", filename2, "_FDC_mth", a, ".jpg"), 
+  #       width = 7.52, height = 4.56, dpi = 300)
   
 }
 
@@ -2033,6 +2045,7 @@ ggsave(paste0(new_dir, "/", filename2, "_FDC_mth_all.jpg"), dpi = 300,
 
 
 Percentage exceedance (%) of flow in **m^3^/s** and **MLD** for each month.
+
 
 ```{r}
 
@@ -2196,7 +2209,8 @@ include_graphics(paste0(new_dir, "/", filename2, "_FDC_mth_summary.jpg"))
 >
 > [Manual on Low-flow Estimation and Prediction - Chapter 7](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
 
-Three most commonly used durations are considered here, which are 1, 7 and 30 days duration. Moving average of all three durations are calculated and the annual minimum series are extracted.
+Three most commonly used durations are considered here, which are 1, 7 and 30 days duration. Moving average for all three durations are calculated and the annual minimum series are compiled for each duration.
+
 
 ```{r}
 
@@ -2216,10 +2230,6 @@ mam_data_all <- dplyr::bind_rows(list("1"=mam1_data,
                              .id = 'duration')
 
 ```
-
-> An exploratory data analysis, including a graphical display of the data, is generally recommended before performing a statistical analysis, as it might reveal and help to explore important characteristics of the time series.
->
-> [Manual on Low-flow Estimation and Prediction - Section 7.3](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
 
 
 The annual minimum series for each duration are plotted below: 
@@ -2332,7 +2342,7 @@ Several distribution functions are fitted to each annual minima series. The prob
 > [Department of Irrigation and Drainage Malaysia (DID). (2015). *Hydrological Procedure No. 12: Magnitude and Frequency of Low Flows in Peninsular Malaysia*](http://h2o.water.gov.my/man_hp1/HP_12_Revised.pdf)
 
 
-The results of the fit are evaluated using Root Mean Square Error (RMSE) to select the best probability distribution.
+The results of the fit are evaluated using *Root Mean Square Error (RMSE)* to select the best probability distribution.
 
 ```{r}
 
@@ -2644,7 +2654,7 @@ Q1_RP %>%
 
 ### Evaluation
 
-The results can be sorted by clicking on the header of interest.
+Rank the results by clicking on 'RMSE' column header.
 
 ```{r}
 
@@ -2720,7 +2730,7 @@ Q7_RP %>%
 
 ### Evaluation
 
-The results can be sorted by clicking on the header of interest.
+Rank the results by clicking on 'RMSE' column header.
 
 ```{r}
 
@@ -2796,7 +2806,7 @@ Q30_RP %>%
 
 ### Evaluation
 
-The results can be sorted by clicking on the header of interest.
+Rank the results by clicking on 'RMSE' column header.
 
 ```{r}
 
@@ -2809,9 +2819,9 @@ reactable(Q30_rmse,
 ```
 
 
-## Overall comparison
+## Evaluation for all durations
 
-Compare RMSE for all durations, all distributions.
+Compare RMSE for all durations and all distributions. Rank the results by clicking on column header.
 
 ```{r}
 
@@ -2832,7 +2842,7 @@ reactable(compare_RMSE, highlight = TRUE, striped = TRUE,
 
 # Export to Excel
 
-Check work directory for output.
+Check download directory for output in Excel format.
 
 ```{r, echo= FALSE, results= "hide"}
 
@@ -2853,14 +2863,16 @@ FDC_table_MLD %>% mutate_at(2:11, funs(round(., 1)))
 
 ###########################
 #summary page
-input_param <- c('Basin',
-                 'Streamflow Station', 
-                 'Length of record (year)', 
-                 #'Catchment Area (sqkm)',
-                 'Long-term mean flow (m3/s)')
+input_param <- c(
+  'Station number',
+  'Station name', 
+  'Length of record (year)', 
+  #'Catchment Area (sqkm)',
+  'Long-term mean flow (m3/s)'
+  )
 
-input_value <- c(station_name,
-                 station_no,
+input_value <- c(station_no,
+                 station_name,
                  year_w_data,
                  #catch_A,
                  avg_Flow_yr)
@@ -2890,8 +2902,9 @@ setColWidths(wb, 1, cols = 1:2, widths = "auto")
 
 ###########################
 #insert data frames
-writeData(wb, "Input", station_name, 
-          startRow = 3, startCol = 3)
+#writeData(wb, "Input", station_name, 
+#          startRow = 3, startCol = 3)
+
 #input flow data
 flowdata_output <- flowdata_date %>%
   select(Date2, Flow) %>%
@@ -2906,7 +2919,7 @@ writeData(wb, "Flow", Flow_avg_mth,
 
 #add new worksheet for FDC tables
 addWorksheet(wb, "Table")
-writeData(wb, "Table", "Exceedance Frequency (%) of Flow (m3/s)", 
+writeData(wb, "Table", "Exceedance Frequency (%) of Flow (m^3/s)", 
           startRow = 1, startCol = 1)
 writeData(wb, "Table", FDC_table_pv, 
           startRow = 2, startCol = 1)
@@ -3030,9 +3043,34 @@ saveWorkbook(wb, file = paste0(new_dir, "/", filename2, "_flow_analysis.xlsx"),
 
 # References
 
-[Manual on Low-flow Estimation and Prediction](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+[Manual on Low-flow Estimation and Prediction. (2008). WMO](http://www.wmo.int/pages/prog/hwrp/publications/low-flow_estimation_prediction/WMO%201029%20en.pdf)
+
+[Department of Irrigation and Drainage Malaysia (DID). (2015). *Hydrological Procedure No. 12: Magnitude and Frequency of Low Flows in Peninsular Malaysia*](http://h2o.water.gov.my/man_hp1/HP_12_Revised.pdf)
+
+Vogel R. M., Fennessey N. M. (1994). Flow-duration curves. I: New interpretation and confidence intervals. *Journal of Water Resources Planning and Management*, 120(4), 485–504.
 
 ## R Packages
 
-1. lfstat
-1. 
+1. [lfstat](https://cran.r-project.org/web/packages/lfstat/index.html)
+1. [lmom](https://cran.r-project.org/web/packages/lmom/index.html)
+1. [lmomRFA](https://cran.r-project.org/web/packages/lmomRFA/index.html)
+1. [Metrics](https://cran.r-project.org/web/packages/Metrics/index.html)
+1. [tidyverse](https://cran.r-project.org/web/packages/tidyverse/index.html)
+1. [lubridate](https://cran.r-project.org/web/packages/lubridate/index.html)
+1. [scales](https://cran.r-project.org/web/packages/scales/index.html)
+1. [rmarkdown](https://cran.r-project.org/web/packages/rmarkdown/index.html)
+1. [knitr](https://cran.r-project.org/web/packages/knitr/index.html)
+1. [plotly](https://cran.r-project.org/web/packages/plotly/index.html)
+1. [kableExtra](https://cran.r-project.org/web/packages/kableExtra/index.html)
+1. [DT](https://cran.r-project.org/web/packages/DT/index.html)
+1. [reactable](https://cran.r-project.org/web/packages/reactable/index.html)
+1. [extrafont](https://cran.r-project.org/web/packages/extrafont/index.html)
+1. [openxlsx](https://cran.r-project.org/web/packages/openxlsx/index.html)
+1. [ggrepel](https://cran.r-project.org/web/packages/ggrepel/index.html)
+1. [ggpmisc](https://cran.r-project.org/web/packages/ggpmisc/index.html)
+1. [grid](https://cran.r-project.org/web/packages/grid/index.html)
+1. [gridExtra](https://cran.r-project.org/web/packages/gridExtra/index.html)
+1. [ggpubr](https://cran.r-project.org/web/packages/ggpubr/index.html)
+1. [gghighlight](https://cran.r-project.org/web/packages/gghighlight/index.html)
+1. [RColorBrewer](https://cran.r-project.org/web/packages/RColorBrewer/index.html)
+
